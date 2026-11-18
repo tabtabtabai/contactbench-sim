@@ -68,6 +68,102 @@ class G1DialLog:
                 "robot_object_contact_N": round(ro, 4)}
 
 
+I_UP = 8                                        # the plan's straight-up segment: the episode starts raised
+
+
+def _lerp_way(way_t, way_q, way_g, tau):
+    k = int(np.clip(np.searchsorted(way_t, tau, side="right") - 1, 0, len(way_t) - 2))
+    s = float(np.clip((tau - way_t[k]) / max(1e-9, way_t[k + 1] - way_t[k]), 0, 1))
+    return way_q[k] + s * (way_q[k + 1] - way_q[k]), way_g[k] + s * (way_g[k + 1] - way_g[k])
+
+
+def _stroke_controller(traj, lg, rig, arm_names, fingers, tq_index, f_index, go, st, dt, target_deg):
+    """The dial in strokes, closed on the MEASURED dial angle: per stroke approach (on the clock), close, turn with a
+    bounded lead to the stroke's end (the last: within TRIM_DEG of the target, or as far as it reaches), settle, open,
+    rise; then the retreat (straight up, back over the reset pose's hand, down into it) and stand still."""
+    S = []
+    for k, sk in enumerate(traj["strokes"]):
+        way = sk["waypoints"][(I_UP if k == 0 else 0):sk["i_close"] + 1]
+        t0 = way[0][0]
+        pre = PRE_HOLD if k == 0 else 0.0
+        wt = np.array([0.0] + [w[0] - t0 + pre for w in way])
+        wq = np.array([way[0][1]] + [w[1] for w in way])
+        tg = sk["tau_g"][(I_UP if k == 0 else 0):sk["i_close"] + 1]
+        wg = np.array([tg[0]] + tg)
+        up = sk["up"]
+        S.append({"wt": wt, "wq": wq, "wg": wg, "modes": ["open"] + [w[2] for w in way],
+                  "turn": {kk: np.asarray(v) for kk, v in sk["turn_table"].items()},
+                  "ut": np.array([0.0] + [w[0] for w in up]), "uq": np.array([sk["turn_table"]["q"][-1]] + [w[1] for w in up]),
+                  "ug": np.array([sk["turn_table"]["tau_g"][-1]] + sk["up_tau_g"]), "last": k == len(traj["strokes"]) - 1})
+    ret = traj["retreat"]
+    rt = np.array([0.0] + [w[0] for w in ret])
+    rq = np.array([S[-1]["uq"][-1]] + [w[1] for w in ret])
+    rg = np.array([S[-1]["ug"][-1]] + traj["retreat_tau_g"])
+    st.update(k=0, phase="approach", cmd=float(S[0]["turn"]["deg"][0]), t_phase=0.0)
+
+    def table(T, x):
+        x = float(np.clip(x, T["deg"][0], T["deg"][-1]))
+        return (np.array([np.interp(x, T["deg"], T["q"][:, j]) for j in range(T["q"].shape[1])]),
+                np.array([np.interp(x, T["deg"], T["tau_g"][:, j]) for j in range(T["tau_g"].shape[1])]))
+
+    def control(t):
+        ph, sk = st["phase"], S[st["k"]]
+        ang = float(np.degrees(lg.log[-1]["ang"])) if lg.log else 0.0
+        tau = t - st["t_phase"]
+        close = True
+        if ph == "approach":
+            q, g = _lerp_way(sk["wt"], sk["wq"], sk["wg"], tau)
+            k_ = int(np.clip(np.searchsorted(sk["wt"], tau, side="right"), 1, len(sk["modes"]) - 1))
+            close = sk["modes"][k_] == "close"
+            if tau >= sk["wt"][-1]:
+                st["cmd"] = float(sk["turn"]["deg"][0])
+                go("turn", t)
+        elif ph in ("turn", "settle"):
+            end = float(sk["turn"]["deg"][-1])
+            if ph == "turn":
+                st["cmd"] = min(st["cmd"] + TURN_RATE * dt, ang + TURN_LEAD, end)
+                done = (abs(ang - target_deg) <= TRIM_DEG or ang >= end - TRIM_DEG) if sk["last"] else ang >= end - 1.0
+                if done:
+                    go("settle", t)
+            q, g = table(sk["turn"], st["cmd"])
+            if ph == "settle" and tau >= T_SETTLE:
+                go("open", t)
+        elif ph == "open":
+            q, g = table(sk["turn"], st["cmd"])
+            close = False
+            if tau >= T_OPEN:
+                go("rise", t)
+        elif ph == "rise":
+            q, g = _lerp_way(sk["ut"], sk["uq"], sk["ug"], tau)
+            close = False
+            if tau >= sk["ut"][-1]:
+                if sk["last"]:
+                    go("retreat", t)
+                else:
+                    st["k"] += 1
+                    go("approach", t)
+        elif ph in ("retreat", "still"):
+            q, g = _lerp_way(rt, rq, rg, min(tau, rt[-1]) if ph == "retreat" else rt[-1])
+            close = False
+            if ph == "retreat" and tau >= rt[-1]:
+                go("still", t)
+            if ph == "still" and tau >= T_STILL:
+                raise StopRun
+        if t >= TIMEOUT_S:
+            raise StopRun
+        qt = rig.control.joint_target_q.numpy()
+        for n, v in zip(arm_names, q):
+            qt[tq_index[n]] = v
+        for n in fingers:
+            qt[tq_index[n]] = FINGER_CLOSE if close else FINGER_OPEN
+        rig.control.joint_target_q.assign(qt)
+        jf = rig.control.joint_f.numpy()
+        jf[f_index] = g
+        rig.control.joint_f.assign(jf)
+
+    return control
+
+
 def parse(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--model", required=True)
@@ -124,23 +220,27 @@ def main(argv=None):
     fingers = [f"{side}_dex1_finger_joint_1", f"{side}_dex1_finger_joint_2"]
     tq_index = {n: int(tqs[g1["joints"][n]]) for n in [*arm_names, *fingers]}
     f_index = [int(qds[g1["joints"][n]]) for n in arm_names]
-    way = traj["waypoints"][:traj.get("i_close", len(traj["waypoints"]) - 1) + 1]
+    way = (traj["waypoints"] if "waypoints" in traj else traj["strokes"][0]["waypoints"])[
+        :traj.get("i_close", traj["strokes"][0]["i_close"] if "strokes" in traj else 0) + 1]
     ts = np.array([w[0] for w in way]) + PRE_HOLD
     ts[0] = 0.0
-    Q, G = np.array([w[1] for w in way]), np.array(traj["tau_g"][:len(way)])
+    Q = np.array([w[1] for w in way])
+    G = np.array((traj["tau_g"] if "tau_g" in traj else traj["strokes"][0]["tau_g"])[:len(way)])
     ret = traj.get("retreat") or []              # straight up, back over the reset pose's hand, down into it
     RQ = np.array([w[1] for w in ret]) if ret else None
     RG = np.array(traj.get("retreat_tau_g") or [])
     RT = np.array([w[0] for w in ret]) if ret else None
     modes = [w[2] for w in way]
-    T_turn = {k: np.asarray(v) for k, v in traj["turn_table"].items()}
+    T_turn = {k: np.asarray(v) for k, v in (traj["turn_table"] if "turn_table" in traj
+                                             else traj["strokes"][0]["turn_table"]).items()}
     T_ret = {k: np.asarray(v) for k, v in traj["retreat_table"].items()} if "retreat_table" in traj else None
     q0 = rig.s0.joint_q.numpy()
     qt0 = rig.control.joint_target_q.numpy()
     for n, v in init_pose(a.model).items():       # both arms in the reset pose; the idle one holds it throughout
         if n in g1["joints"]:
             q0[qi[n]], qt0[int(tqs[g1["joints"][n]])] = v, v
-    for n, v in zip(arm_names, Q[0]):
+    q_start = traj["strokes"][0]["waypoints"][I_UP][1] if "strokes" in traj else Q[0]   # strokes: start raised
+    for n, v in zip(arm_names, q_start):
         q0[qi[n]], qt0[tq_index[n]] = v, v
     for n in fingers:
         q0[qi[n]], qt0[tq_index[n]] = FINGER_OPEN, FINGER_OPEN
@@ -215,6 +315,9 @@ def main(argv=None):
         jf = rig.control.joint_f.numpy()
         jf[f_index] = g
         rig.control.joint_f.assign(jf)
+
+    if "strokes" in traj:                        # the Isaac setup: the dial in strokes (its brake holds between)
+        control = _stroke_controller(traj, lg, rig, arm_names, fingers, tq_index, f_index, go, st, dt, target_deg)
 
     try:
         rec = rig.run(TIMEOUT_S + 1.0, control, lg.extra)
