@@ -7,7 +7,11 @@ front of the G1, which stands on the floor 0.74 m below the table top with its p
 controller's standing lean.  The arm follows the joint trajectory of matrix's MuJoCo G1 IK for this placement and
 seed (``g1_door_knob_traj*.json``, made by g1_dex1_prepare.py): it starts at the pre-grasp 8 cm above the knob,
 descends to the knob's equator (the Dex1's fingertips reach 27 mm past the pad centre, so a lower grasp hits the knob
-module's housing), squeezes, turns the knob clockwise to its stop, lifts the leaf about its hinge to 45 deg and holds.
+module's housing) and squeezes, on the clock; then, closed on MEASURED state like the FR3 expert, it turns the knob
+clockwise with a bounded lead over the measured knob angle until the measured latch has cleared the jamb, and lifts
+the leaf about its hinge with a bounded lead over the measured door angle to 45 deg, and holds.  The hand poses come
+from IK tables over the knob angle and the door angle (MuJoCo, same model).  An open-loop turn outran the knob: the
+pinch creeps under the spring torque in MuJoCo, as the FR3 task notes.
 
 The callbacks keep the FR3 task's names and logs (``probe``, ``log``, ``tcp_log``), and the rig carries its pad
 probes, cameras and root (``pad_probes``, ``camera_mounts``, ``robot_base``), so ``force_bench.policy_env`` runs it
@@ -32,7 +36,7 @@ import force_bench.appendix_tasks._door_kit as dk
 from force_bench.appendix_tasks._door_kit import (LOCK_PROBE_NM, LOCK_PROBE_S, HingeProbe, build_door, door_angle,
                                                   door_pose, drawn_shapes, joint_reader, lock_probe_check,
                                                   pads_check)
-from force_bench.appendix_tasks.common import appendix_rig
+from force_bench.appendix_tasks.common import StopRun, appendix_rig
 from force_bench.g1.robot import SumProbe, add_g1, camera_mounts, q_indices
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver
@@ -41,6 +45,12 @@ NAME = "turn_doorknob_open_door_flat_g1"
 FINGER_OPEN, FINGER_CLOSE = -0.02, 0.0          # Dex1 finger joints: -0.02 = 83 mm open; 0.0 = 43 mm (< the knob)
 IMPRATIO = 10.0
 PRE_HOLD = 0.6                                  # s at the pre-grasp before descending (covers the lock probe)
+# the closed-loop turn and lift (privileged, on MEASURED knob, latch and door state, as the FR3 expert):
+TURN_RATE, TURN_LEAD = 30.0, 15.0               # deg/s of commanded knob turn; at most this far ahead of the knob
+CLEAR_MARGIN_MM = 0.1                           # turn until the measured latch is this far past the jamb face
+PAUSE_S = 0.4
+LIFT_RATE, LIFT_LEAD = 12.0, 3.0                # deg/s of commanded door angle; at most this far ahead of the door
+OPEN_TO_DEG, HOLD_S, TIMEOUT_S = 45.0, 1.6, 40.0
 CAM_POS, CAM_TARGET = np.array([0.55, -0.55, 0.55]), np.array([-0.08, 0.20, 0.05])
 
 
@@ -95,16 +105,19 @@ def main(argv=None):
     fingers = [f"{side}_dex1_finger_joint_1", f"{side}_dex1_finger_joint_2"]
     tq_index = {n: int(tqs[g1["joints"][n]]) for n in [*arm_names, *fingers]}
     tips = [g1["bodies"][f"{side}_hand_Link{i}_3"] for i in (1, 2)]
-    way = traj["waypoints"][1:]                  # start AT the pre-grasp, clear of the door (see the docstring)
+    # the approach on the clock: from the pre-grasp (clear of the door, see the docstring) to the squeeze
+    way = traj["waypoints"][1:traj["i_close"] + 1]
     t0 = way[0][0]
     way = [(0.0, way[0][1], way[0][2])] + [(w[0] - t0 + PRE_HOLD, w[1], w[2]) for w in way]
     ts = np.array([w[0] for w in way])
     Q = np.array([w[1] for w in way])
+    G = np.array([traj["tau_g"][1]] + traj["tau_g"][1:traj["i_close"] + 1])
     modes = [w[2] for w in way]
-    # the whole-body controller's gravity compensation: the arm's gravity torques at each waypoint, fed forward
-    G = np.array([traj["tau_g"][1]] + traj["tau_g"][1:]) if "tau_g" in traj else np.zeros_like(Q)
+    T_turn = {k: np.asarray(v) for k, v in traj["turn_table"].items()}
+    T_lift = {k: np.asarray(v) for k, v in traj["lift_table"].items()}
     qds = rig.model.joint_qd_start.numpy()
     f_index = [int(qds[g1["joints"][n]]) for n in arm_names]
+    clear_m = (JAMB_CLEAR_MM + CLEAR_MARGIN_MM) * 1e-3
     q0 = rig.s0.joint_q.numpy()
     qt0 = rig.control.joint_target_q.numpy()
     for n, v in zip(arm_names, Q[0]):
@@ -116,22 +129,63 @@ def main(argv=None):
     import newton
     newton.eval_fk(rig.model, rig.s0.joint_q, rig.s0.joint_qd, rig.s0)
     log, tcp_log = [], []
+    st = {"phase": "approach", "psi": 0.0, "phi": 0.0, "t_phase": 0.0, "phases": []}
+    dt = 1.0 / rig.fps
+
+    def table(T, x):
+        x = float(np.clip(x, T["deg"][0], T["deg"][-1]))
+        return (np.array([np.interp(x, T["deg"], T["q"][:, j]) for j in range(T["q"].shape[1])]),
+                np.array([np.interp(x, T["deg"], T["tau_g"][:, j]) for j in range(T["tau_g"].shape[1])]))
+
+    def go(phase, t):
+        st["phase"], st["t_phase"] = phase, t
+        st["phases"].append((round(t, 3), phase))
 
     def control(t):
         probe.set(-LOCK_PROBE_NM if LOCK_PROBE_S[0] <= t < LOCK_PROBE_S[1] else 0.0)
+        bq = rig.s0.body_q.numpy()
+        q_now = rig.s0.joint_q.numpy()
+        knob_deg = float(np.degrees(-q_now[jq["knob"]]))
+        latch = float(q_now[jq["latch"]])
+        door_deg = float(np.degrees(-door_angle(bq[leaf])))
+        ph = st["phase"]
+        close = True
+        if ph == "approach":
+            k = int(np.clip(np.searchsorted(ts, t, side="right") - 1, 0, len(ts) - 2))
+            s_ = float(np.clip((t - ts[k]) / max(1e-9, ts[k + 1] - ts[k]), 0, 1))
+            q, g = Q[k] + s_ * (Q[k + 1] - Q[k]), G[k] + s_ * (G[k + 1] - G[k])
+            close = modes[k + 1] == "close"
+            if t >= ts[-1]:
+                go("turn", t)
+        elif ph in ("turn", "pause"):
+            if latch < clear_m:                   # still in the strike: advance, bounded ahead of the knob
+                st["psi"] = min(st["psi"] + TURN_RATE * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
+            elif ph == "turn":
+                go("pause", t)
+            q, g = table(T_turn, st["psi"])
+            if ph == "pause" and t - st["t_phase"] >= PAUSE_S:
+                go("lift", t)
+        elif ph in ("lift", "hold"):
+            if latch < clear_m and door_deg < 5.0:   # the latch slipped back before the door opened: turn again
+                st["psi"] = min(st["psi"] + TURN_RATE * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
+            st["phi"] = min(st["phi"] + LIFT_RATE * dt, door_deg + LIFT_LEAD, OPEN_TO_DEG)
+            q, g = table(T_lift, st["phi"])
+            if ph == "lift" and st["phi"] >= OPEN_TO_DEG and door_deg >= OPEN_TO_DEG - 1.0:
+                go("hold", t)
+            if ph == "hold" and t - st["t_phase"] >= HOLD_S:
+                raise StopRun
+        if t >= TIMEOUT_S:
+            raise StopRun
         qt = rig.control.joint_target_q.numpy()
-        k = int(np.clip(np.searchsorted(ts, t, side="right") - 1, 0, len(ts) - 2))
-        s = float(np.clip((t - ts[k]) / max(1e-9, ts[k + 1] - ts[k]), 0, 1))
-        q = Q[k] + s * (Q[k + 1] - Q[k])
         for n, v in zip(arm_names, q):
             qt[tq_index[n]] = v
-        jf = rig.control.joint_f.numpy()
-        jf[f_index] = G[k] + s * (G[k + 1] - G[k])
-        rig.control.joint_f.assign(jf)
-        f = FINGER_CLOSE if modes[k + 1] == "close" else FINGER_OPEN
+        f = FINGER_CLOSE if close else FINGER_OPEN
         for n in fingers:
             qt[tq_index[n]] = f
         rig.control.joint_target_q.assign(qt)
+        jf = rig.control.joint_f.numpy()
+        jf[f_index] = g
+        rig.control.joint_f.assign(jf)
 
     def extra(state, t):
         bq = state.body_q.numpy()
@@ -143,7 +197,11 @@ def main(argv=None):
         return {"door_deg": round(float(np.degrees(-th)), 3), "knob_deg": round(float(np.degrees(-ph)), 2),
                 "latch_retract_mm": round(x * 1000, 3), "pad1_N": round(p1, 2), "pad2_N": round(p2, 2)}
 
-    rec = rig.run(float(ts[-1]), control, extra)
+    try:
+        rec = rig.run(TIMEOUT_S + 1.0, control, extra)
+    except StopRun:
+        rec = rig.rec
+    print("phases:", st["phases"])
     paths = rec.save("rollout", force_keys=["door_deg", "knob_deg", "latch_retract_mm", "pad1_N", "pad2_N"])
     print("saved:", paths)
     # the row's criteria on world state (the same windows as policy_env's DoorAdapter)
