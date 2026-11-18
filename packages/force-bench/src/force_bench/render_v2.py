@@ -67,11 +67,11 @@ TEX_PX = 512
 
 # version 3: light box
 V3_KEY_SAMPLES = 24
-V3_KEY_CONE_DEG = 12.0
-V3_KEY_INTENSITY = 0.55
+V3_KEY_CONE_DEG = 6.0
+V3_KEY_INTENSITY = 0.85
 V3_SHADOW_MIN_VISIBILITY = 0.0       # the key is fully occluded in shadow; the shadowless dome lifts it
 V3_DOME = [                          # (travel direction, intensity): no shadows, a soft wrap from above and around
-    ((0.0, 0.0, -1.0), 0.16),
+    ((0.0, 0.0, -1.0), 0.19),
     ((0.7, 0.0, -0.7), 0.05), ((-0.7, 0.0, -0.7), 0.05),
     ((0.0, 0.7, -0.7), 0.05), ((0.0, -0.7, -0.7), 0.06),
     ((0.0, 0.0, 1.0), 0.04),         # a little bounce from below
@@ -135,7 +135,7 @@ MATERIALS_V3 = [
     (r"^nut_shape$", "pla_grey"),
 ]
 SPEC_V3 = {
-    "mat": ((0.79, 0.80, 0.80), "mat", 3.3),
+    "mat": ((0.80, 0.80, 0.79), "mat", 3.3),
     "floor": ((0.60, 0.60, 0.59), "plain", 2.0),
     "wall": ((0.86, 0.86, 0.85), "plain", 1.0),
     "pla_white": ((0.91, 0.91, 0.90), "pla", 40.0),
@@ -233,8 +233,8 @@ def _texture(kind: str, seed: int = 0) -> np.ndarray:
         rgb = np.stack([v, v * 0.98, v * 0.95], -1)
     elif kind == "mat":
         # the real fixture's ribbed fabric mat: fine ribs (~3 cm at this scale) at a few percent, plus faint noise
-        ribs = 0.5 + 0.5 * np.sin(2 * np.pi * 10 * y)
-        v = 0.975 + 0.015 * ribs + 0.010 * (_fbm((n, n), rng, 5) - 0.5)
+        ribs = 0.5 + 0.5 * np.sin(2 * np.pi * 14 * y)
+        v = 0.982 + 0.010 * ribs + 0.008 * (_fbm((n, n), rng, 5) - 0.5)
         rgb = np.stack([v, v, v], -1)
     elif kind == "pla":
         v = 0.985 + 0.015 * _fbm((n, n), rng, 5)
