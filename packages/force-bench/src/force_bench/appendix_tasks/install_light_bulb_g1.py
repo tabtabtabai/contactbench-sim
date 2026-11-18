@@ -43,6 +43,7 @@ YAW_STEP = math.radians(5.0)
 YAW_MARGIN = math.radians(10.0)     # inside the measured window at both ends
 YAW_SPAN_MAX = math.radians(300.0)
 IK_TOL = (0.001, math.radians(1.0))
+WRIST_MAX = 0.9                     # rad/s: our G1 scripted policies' wrist rule (<= 1 rad/s), 10 % inside it
 FF_MARGIN = 0.5                     # N.m of feed-forward budget above the largest measured over the window
 DEX1_Q = (-0.02, 0.0245)            # the finger joints' range
 
@@ -139,6 +140,12 @@ def setup(a, name):
     yaw_hi, yaw_lo, q_hi, gmax = wrist_window(ik, S.axis_xy, tcp0[2], seat_tcp_z)
     kt.YAW_HI, kt.YAW_LO = yaw_hi, yaw_lo
     kt.HAND_BODY = PREFIX + f"{SIDE}_hand_base_link"
+    # the G1's speed rule on the expert's FR3 timings: twist <= WRIST_MAX, and the open hand's turn back over the
+    # window (a quintic: peak 1.875 x the mean rate) timed to the same peak.  At the FR3's 1.3 s the return peaked
+    # ~2.5 rad/s and the lagging arm swung the pad centre 17 mm off the axis before the regrasp.
+    for k in ("OMEGA", "OMEGA_ENGAGE", "OMEGA_TAKEUP", "OMEGA_SEAT"):
+        setattr(kt, k, min(getattr(kt, k), WRIST_MAX))
+    kt.T_RET = max(kt.T_RET, 1.875 * (yaw_hi - yaw_lo) / WRIST_MAX)
     ik.joint_q.assign(q_hi)
     q_sol = ik.solve(tcp0, down_grasp_quat(yaw_hi), iterations=96)
     budget = gmax + FF_MARGIN
@@ -207,6 +214,7 @@ def setup(a, name):
                    "pelvis_cb": [float(v) for v in wp.transform_get_translation(pelvis)],
                    "door_shift_m": [float(v) for v in (S.axis_xy - kt.AXIS_XY)],
                    "wrist_window_deg": [round(math.degrees(yaw_hi), 1), round(math.degrees(yaw_lo), 1)],
+                   "twist_rad_s": kt.OMEGA, "return_s": round(kt.T_RET, 2),
                    "orient": "top-down", "waist_pitch": None, "gamma_deg": None, "stance_step_m": [0.0, 0.0]}
     print(f"[{NAME}] seed {a.seed}: socket shift {np.round((S.axis_xy - kt.AXIS_XY) * 1e3, 1).tolist()} mm, "
           f"wrist window {math.degrees(yaw_hi):+.0f}..{math.degrees(yaw_lo):+.0f} deg "
