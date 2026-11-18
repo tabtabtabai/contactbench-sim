@@ -220,7 +220,7 @@ def smooth_normals(model) -> None:
         for k in range(3):
             np.add.at(vn, F[:, k], fn)
         vn /= np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-12)
-        mesh.normals = vn.astype(np.float32)
+        mesh._normals = vn.astype(np.float32)      # Mesh.normals is read-only; this is its backing field (newton 1.5.0)
 
 
 # ── the backdrop ─────────────────────────────────────────────────────────────────────────────────────────────────
