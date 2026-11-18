@@ -38,12 +38,12 @@ import numpy as np
 import warp as wp
 
 KEY_SAMPLES = 6
-KEY_CONE_DEG = 7.0
-KEY_INTENSITY = 0.80
-FILL_INTENSITY = 0.30
+KEY_CONE_DEG = 2.5
+KEY_INTENSITY = 0.90
+FILL_INTENSITY = 0.24
 RIM_INTENSITY = 0.22
 SHADOW_BIAS_M = 1.5e-3
-SHADOW_MIN_VISIBILITY = 0.32
+SHADOW_MIN_VISIBILITY = 0.25
 KEY_DIR = np.array([-0.5, 0.6, -0.62])     # the v1 key's travel direction, kept so shadows fall the same way
 FILL_DIR = np.array([0.72, -0.36, -0.58])
 RIM_DIR = np.array([0.15, -0.85, -0.45])   # from behind the scene, toward the cameras
@@ -130,13 +130,22 @@ def _texture(kind: str, seed: int = 0) -> np.ndarray:
     n = TEX_PX
     y, x = np.mgrid[0:n, 0:n].astype(np.float32) / n
     if kind in ("wood", "wood_fine"):
-        warp_ = _fbm((n, n), rng, 4)
-        rings = 10 if kind == "wood" else 16
-        g = np.sin(2 * np.pi * (rings * x + 1.8 * warp_)) * 0.5 + 0.5
-        g = g ** 2.2
-        fibre = _fbm((n, n), rng, 6)
-        v = 0.78 + 0.22 * (0.65 * g + 0.35 * fibre)
-        v *= 1.0 - 0.06 * (np.sin(2 * np.pi * 90 * x + 3 * fibre) > 0.96)
+        # straight-grained boards: growth lines along u bent a little by low-frequency noise, fine fibres, and (for the
+        # table) plank seams with a tone per plank
+        warp_ = _fbm((n, n), rng, 3)
+        lines = 22 if kind == "wood" else 30
+        g = np.sin(2 * np.pi * (lines * y + 0.9 * warp_ + 0.15 * np.sin(2 * np.pi * x))) * 0.5 + 0.5
+        g = g ** 3.0
+        fibre = np.repeat(rng.random((n, 1)).astype(np.float32), n, axis=1)
+        fibre = 0.5 * fibre + 0.5 * _fbm((n, n), rng, 6)
+        v = 0.80 + 0.20 * (0.55 * (1 - g) + 0.45 * fibre)
+        if kind == "wood_fine":
+            planks = 4
+            idx = np.floor(y * planks).astype(int)
+            tone = 0.90 + 0.10 * rng.random(planks).astype(np.float32)
+            v = v * tone[idx % planks]
+            seam = np.abs(y * planks - np.round(y * planks)) < 0.012
+            v = np.where(seam, v * 0.55, v)
         rgb = np.stack([v, v * 0.97, v * 0.93], -1)
     elif kind == "brushed":
         streak = np.repeat(rng.random((n, 1)).astype(np.float32), n, axis=1)
