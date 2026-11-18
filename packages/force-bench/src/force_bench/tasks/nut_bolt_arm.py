@@ -113,6 +113,8 @@ FLOOR_DROP = 0.0041       # m — TCP floor below TCP0 (pad bottoms stay off
 
 # ── regrasp stroke plan ──────────────────────────────────────────────────
 YAW0 = np.deg2rad(80.0)   # strokes sweep +-80 deg = 160 deg = 0.444 turns
+HAND_BODY = "fr3/fr3_link7"   # the body the TCP rides on, and the finger bodies (an embodiment's row sets its own)
+FINGER_BODIES = ("fr3/fr3_leftfinger", "fr3/fr3_rightfinger")
 YAW_BIAS = np.deg2rad(-45.0)
 """Constant offset added to every commanded wrist yaw — i.e. WHERE the
 +-YAW0 stroke window sits in the arm's own workspace.  It is 0 for the
@@ -442,15 +444,15 @@ class RegraspDriver:
         self._relax = 0.0
         self._settle = {"vmax": 0.0, "body": None, "prev": None,
                         "frames": 0, "finite": True, "seat_F": 0.0}
-        self.fl = rig.body_index("fr3/fr3_leftfinger")
-        self.fr = rig.body_index("fr3/fr3_rightfinger")
+        self.fl = rig.body_index(FINGER_BODIES[0])
+        self.fr = rig.body_index(FINGER_BODIES[1])
         self.t_press0 = next((s["t0"] for s in plan if s["kind"] == "press"),
                              None)
         self.axis_xy = np.asarray(axis_xy, dtype=float)
         # TCP expressed in link7's frame (link7 pose from the kinematic IK
         # model at the solved start; the scene pose tracks it): lets the
         # servo MEASURE the true grasp-axis xy each frame
-        l7 = rig.ik.body_pose("fr3/fr3_link7")
+        l7 = rig.ik.body_pose(HAND_BODY)
         Ml7 = trimesh.transformations.quaternion_matrix(
             [l7[6], l7[3], l7[4], l7[5]])
         self.tcp_in_l7 = Ml7[:3, :3].T @ (self.tcp0 - l7[:3])

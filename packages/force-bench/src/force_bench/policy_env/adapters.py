@@ -708,7 +708,8 @@ class NutAdapter(Adapter):
         x = closure(ep.extra_cb)
         self.log, self.ni = x["log"], int(x["ni"])
         self.free_n = CONTACT_FREE_N
-        self.fl, self.fr = self.rig.body_index("fr3/fr3_leftfinger"), self.rig.body_index("fr3/fr3_rightfinger")
+        fb = getattr(self.rig, "finger_bodies", ("fr3/fr3_leftfinger", "fr3/fr3_rightfinger"))   # an embodiment's own
+        self.fl, self.fr = self.rig.body_index(fb[0]), self.rig.body_index(fb[1])
         self.min_z = float(sn.Z_START)
         self.yaw = None              # the nut's unwrapped rotation about the bolt axis, rad
         self._yaw_prev = None
@@ -851,7 +852,8 @@ ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "turn_door_handle_open_
             "screw_nut_onto_screw": NutAdapter,
             # the G1 + Dex1 rows (embodiment variant): the same adapters on the G1's pad probes
             "turn_doorknob_open_door_flat_g1": DoorAdapter, "turn_door_handle_open_door_flat_g1": DoorAdapter,
-            "install_light_bulb_g1": BulbAdapter, "turn_dial_to_target_g1": DialAdapter}
+            "install_light_bulb_g1": BulbAdapter, "turn_dial_to_target_g1": DialAdapter,
+            "screw_nut_onto_screw_g1": NutAdapter}
 
 
 def adapter_for(module: str):
