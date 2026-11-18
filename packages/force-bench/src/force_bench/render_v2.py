@@ -2,8 +2,9 @@
 
 VERSION 3 (``TB_RENDER_VERSION=3``) is the plain-realism look, matched to the real kit in upstream's task videos
 (jingyi-xiang.github.io/contactbench, website_assets/videos/tasks): the parts in their real filament colours
-(sampled from the videos: white PLA ~0.90, grey PLA ~0.44, black ~0.14, silver-grey ~0.43), a light grey ribbed mat as
-the table top (sampled 0.79, the real fixture's surface), a neutral floor and walls, a barely-there noise on every
+(sampled from the videos: white PLA ~0.90, grey PLA ~0.44, black ~0.14, silver-grey ~0.44), the white ribbed board the
+fixtures stand on as the table top (sampled 0.84, with its strip seams), the light maple desk under it as the floor
+(sampled 0.78/0.66/0.51), neutral walls, a barely-there noise on every
 surface instead of decorative textures, and light-box lighting: ONE shadow-casting key light (``V3_KEY_SAMPLES``
 jittered samples over a ``V3_KEY_CONE_DEG`` cone, so the penumbra is smooth) plus a shadowless dome of fill lights that
 lifts the shadows (the raytracer's own ambient term is hard-coded, so the dome stands in for a brighter ambient).
@@ -115,7 +116,7 @@ MATERIALS = [
 # version 3: the real kit's colours (sRGB, sampled from upstream's task videos where visible; kit print colours
 # otherwise), every surface with only a faint noise
 MATERIALS_V3 = [
-    (r"^render_v2/floor$", "floor"),
+    (r"^render_v2/floor$", "desk"),
     (r"^table$", "mat"),
     (r"^render_v2/wall", "wall"),
     (r"^kit/door/", "pla_white"),
@@ -135,8 +136,8 @@ MATERIALS_V3 = [
     (r"^nut_shape$", "pla_grey"),
 ]
 SPEC_V3 = {
-    "mat": ((0.80, 0.80, 0.79), "mat", 3.3),
-    "floor": ((0.60, 0.60, 0.59), "plain", 2.0),
+    "mat": ((0.84, 0.845, 0.84), "mat", 3.3),
+    "desk": ((0.78, 0.66, 0.51), "desk", 1.5),
     "wall": ((0.86, 0.86, 0.85), "plain", 1.0),
     "pla_white": ((0.91, 0.91, 0.90), "pla", 40.0),
     "pla_grey": ((0.45, 0.45, 0.46), "pla", 40.0),
@@ -235,6 +236,14 @@ def _texture(kind: str, seed: int = 0) -> np.ndarray:
         # the real fixture's ribbed fabric mat: fine ribs (~3 cm at this scale) at a few percent, plus faint noise
         ribs = 0.5 + 0.5 * np.sin(2 * np.pi * 14 * y)
         v = 0.982 + 0.010 * ribs + 0.008 * (_fbm((n, n), rng, 5) - 0.5)
+        seam = np.abs(y * 3 - np.round(y * 3)) < 0.003          # the board's strips: a faint seam every ~10 cm
+        v = np.where(seam, v * 0.93, v)
+        rgb = np.stack([v, v, v], -1)
+    elif kind == "desk":
+        # the light maple desk the real board lies on: long, very low-contrast fibres, no rings or planks
+        fibre = np.repeat(rng.random((1, n)).astype(np.float32), n, axis=0)
+        fibre = 0.6 * fibre + 0.4 * _fbm((n, n), rng, 5)
+        v = 0.985 + 0.015 * fibre
         rgb = np.stack([v, v, v], -1)
     elif kind == "pla":
         v = 0.985 + 0.015 * _fbm((n, n), rng, 5)
