@@ -46,7 +46,7 @@ from force_bench.tasks.wrench_nut_arm import hex_flat_phase
 
 NAME = "screw_nut_onto_screw_g1"
 SIDE = "right"
-STANCE = (0.30, -0.15)              # m: the bolt axis ahead of / to the left of the pelvis (set from the reach sweep)
+STANCE = (0.30, -0.30)              # m: the bolt axis ahead of / to the left of the pelvis (a top-down reach sweep at the nut height: 275 deg per grasp here, the most)
 FR3_SWEEP = 7 * math.radians(160.0)  # what the FR3 row's strokes cover
 
 
