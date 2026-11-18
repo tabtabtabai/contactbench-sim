@@ -17,7 +17,8 @@ import warp as wp
 import newton
 
 PREFIX = "g1/"
-FINGER_EFFORT = 40.0          # N per finger: the squeeze (Dex1 spec 5-120 N)
+import os
+FINGER_EFFORT = float(os.environ.get("G1_FINGER_EFFORT", 40.0))   # N per finger: the squeeze (Dex1 spec 5-120 N)
 ARM_KP_SCALE = 10.0           # the arm servo, stiffer than matrix's MuJoCo actuators (kp 300/80): the open-loop
 # scripted expert needs the hand within ~2 mm of its IK pose under gravity and contact (at 1x it sagged 15 mm and
 # drifted 28 mm off the knob's axis while turning).  The joint effort caps stay the G1's (25 / 5 N.m); the real G1
