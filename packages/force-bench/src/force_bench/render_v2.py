@@ -1,4 +1,17 @@
-"""Render version 2 (clockwork-5 fork): materials, textures and lighting for the ContactBench scenes.
+"""Render versions 2 and 3 (clockwork-5 fork): materials, textures and lighting for the ContactBench scenes.
+
+VERSION 3 (``TB_RENDER_VERSION=3``) is the plain-realism look, matched to the real kit in upstream's task videos
+(jingyi-xiang.github.io/contactbench, website_assets/videos/tasks): the parts in their real filament colours
+(sampled from the videos: white PLA ~0.90, grey PLA ~0.44, black ~0.14, silver-grey ~0.43), a light grey ribbed mat as
+the table top (sampled 0.79, the real fixture's surface), a neutral floor and walls, a barely-there noise on every
+surface instead of decorative textures, and light-box lighting: ONE shadow-casting key light (``V3_KEY_SAMPLES``
+jittered samples over a ``V3_KEY_CONE_DEG`` cone, so the penumbra is smooth) plus a shadowless dome of fill lights that
+lifts the shadows (the raytracer's own ambient term is hard-coded, so the dome stands in for a brighter ambient).
+Exposure is set so an upward face receives ~1.0 of light: the displayed colour of a lit surface is its sRGB albedo,
+shaded in linear and written as sRGB by the renderer.  Everything below about the backdrop, smooth normals and the
+lighting patch applies to both versions; version 2's materials and lights are kept as they were.
+
+VERSION 2 (``TB_RENDER_VERSION=2``): the first pass, kept for reference.
 
 ``TB_RENDER_VERSION=2`` turns it on for a process; the default, 1, is upstream's look and nothing here runs.  It
 changes only how the scene looks: camera poses, resolutions and fields of view are untouched, and the physics is
@@ -52,6 +65,18 @@ FILL_DIR = np.array([0.72, -0.36, -0.58])
 RIM_DIR = np.array([0.15, -0.85, -0.45])   # from behind the scene, toward the cameras
 TEX_PX = 512
 
+# version 3: light box
+V3_KEY_SAMPLES = 24
+V3_KEY_CONE_DEG = 12.0
+V3_KEY_INTENSITY = 0.55
+V3_SHADOW_MIN_VISIBILITY = 0.0       # the key is fully occluded in shadow; the shadowless dome lifts it
+V3_DOME = [                          # (travel direction, intensity): no shadows, a soft wrap from above and around
+    ((0.0, 0.0, -1.0), 0.16),
+    ((0.7, 0.0, -0.7), 0.05), ((-0.7, 0.0, -0.7), 0.05),
+    ((0.0, 0.7, -0.7), 0.05), ((0.0, -0.7, -0.7), 0.06),
+    ((0.0, 0.0, 1.0), 0.04),         # a little bounce from below
+]
+
 
 def version() -> int:
     try:
@@ -86,6 +111,48 @@ MATERIALS = [
     (r"^bolt$", "zinc"),
     (r"^nut_shape$", "zinc"),
 ]
+
+# version 3: the real kit's colours (sRGB, sampled from upstream's task videos where visible; kit print colours
+# otherwise), every surface with only a faint noise
+MATERIALS_V3 = [
+    (r"^render_v2/floor$", "floor"),
+    (r"^table$", "mat"),
+    (r"^render_v2/wall", "wall"),
+    (r"^kit/door/", "pla_white"),
+    (r"^kit/doorknob_module/(doorknob_\d|door_handle_\d)", "pla_grey"),
+    (r"^kit/doorknob_module/doorknob_module_(top|bottom)$", "pla_white"),
+    (r"^kit/doorknob_module/doorknob_module_(gear|latch|spring)", "pla_grey"),
+    (r"^kit/lock_module/lock_(top|bottom)$", "pla_white"),
+    (r"^kit/lock_module/", "pla_grey"),
+    (r"^kit/bulb/", "pla_white"),
+    (r"^kit/socket/", "pla_silver"),
+    (r"^kit/dial/dial_(bottom|top)$", "pla_black"),
+    (r"^kit/dial/dial_grid$", "pla_white"),
+    (r"^kit/dial/dial_arrow$", "pla_white"),
+    (r"^kit/dial/dial_knob", "pla_grey_light"),
+    (r"^kit/dial/(pad_\d|dial_spring)", "pla_black"),
+    (r"^bolt$", "pla_grey"),
+    (r"^nut_shape$", "pla_grey"),
+]
+SPEC_V3 = {
+    "mat": ((0.79, 0.80, 0.80), "mat", 3.3),
+    "floor": ((0.60, 0.60, 0.59), "plain", 2.0),
+    "wall": ((0.86, 0.86, 0.85), "plain", 1.0),
+    "pla_white": ((0.91, 0.91, 0.90), "pla", 40.0),
+    "pla_grey": ((0.45, 0.45, 0.46), "pla", 40.0),
+    "pla_grey_light": ((0.50, 0.50, 0.51), "pla", 40.0),
+    "pla_silver": ((0.45, 0.46, 0.47), "pla", 40.0),
+    "pla_black": ((0.14, 0.14, 0.15), "pla", 40.0),
+}
+
+
+def _materials():
+    return MATERIALS_V3 if version() >= 3 else MATERIALS
+
+
+def _spec():
+    return SPEC_V3 if version() >= 3 else SPEC
+
 
 # material -> (base color, texture kind, cycles per metre)
 SPEC = {
@@ -164,6 +231,17 @@ def _texture(kind: str, seed: int = 0) -> np.ndarray:
         grout = (np.minimum(np.abs(x - np.round(x * 2) / 2), np.abs(y - np.round(y * 2) / 2)) < 0.006)
         v = np.where(grout, 0.55, v)
         rgb = np.stack([v, v * 0.98, v * 0.95], -1)
+    elif kind == "mat":
+        # the real fixture's ribbed fabric mat: fine ribs (~3 cm at this scale) at a few percent, plus faint noise
+        ribs = 0.5 + 0.5 * np.sin(2 * np.pi * 10 * y)
+        v = 0.975 + 0.015 * ribs + 0.010 * (_fbm((n, n), rng, 5) - 0.5)
+        rgb = np.stack([v, v, v], -1)
+    elif kind == "pla":
+        v = 0.985 + 0.015 * _fbm((n, n), rng, 5)
+        rgb = np.stack([v, v, v], -1)
+    elif kind == "plain":
+        v = 0.98 + 0.02 * _fbm((n, n), rng, 5)
+        rgb = np.stack([v, v, v], -1)
     elif kind == "plaster":
         v = 0.90 + 0.10 * _fbm((n, n), rng, 6)
         rgb = np.stack([v, v, v], -1)
@@ -174,7 +252,7 @@ def _texture(kind: str, seed: int = 0) -> np.ndarray:
 
 
 def _match(label: str):
-    for pat, mat in MATERIALS:
+    for pat, mat in _materials():
         if re.search(pat, label):
             return mat
     return None
@@ -188,7 +266,7 @@ def apply_colors(model) -> None:
     for i, lbl in enumerate(model.shape_label):
         mat = _match(str(lbl or ""))
         if mat is not None:
-            colors[i] = SPEC[mat][0]
+            colors[i] = _spec()[mat][0]
     model.shape_color.assign(colors.astype(np.float32))
 
 
@@ -274,14 +352,15 @@ def configure_sensor(cam, model) -> None:
     datas, by_mat = [], {}
     for i, lbl in enumerate(model.shape_label):
         mat = _match(str(lbl or ""))
-        if mat is None or SPEC[mat][1] is None:
+        spec = _spec()
+        if mat is None or spec[mat][1] is None:
             continue
         if mat not in by_mat:
             d = TextureData()
-            d.texture = wp.Texture2D(_texture(SPEC[mat][1], seed=len(by_mat)), filter_mode=wp.TextureFilterMode.LINEAR,
+            d.texture = wp.Texture2D(_texture(spec[mat][1], seed=len(by_mat)), filter_mode=wp.TextureFilterMode.LINEAR,
                                      address_mode=wp.TextureAddressMode.WRAP, normalized_coords=True, dtype=wp.uint8,
                                      num_channels=4, device=dev)
-            r = float(SPEC[mat][2])
+            r = float(spec[mat][2])
             d.repeat = wp.vec2f(r, r)
             by_mat[mat] = len(datas)
             datas.append(d)
@@ -297,7 +376,27 @@ def configure_sensor(cam, model) -> None:
 
 
 def _lights(ctx, dev) -> None:
-    """Soft key (jittered samples), fill and rim; each light's intensity is the length of its direction vector."""
+    """Version 3: one soft key (V3_KEY_SAMPLES jittered shadow samples over a V3_KEY_CONE_DEG cone, spread over the cone's
+    area so the penumbra is smooth) and a shadowless dome.  Version 2: a soft key (6 samples), fill and rim.  Each
+    light's intensity is the length of its direction vector (see _patch_lighting)."""
+    if version() >= 3:
+        key = KEY_DIR / np.linalg.norm(KEY_DIR)
+        a = np.cross(key, [0.0, 0.0, 1.0])
+        a /= np.linalg.norm(a)
+        b = np.cross(key, a)
+        dirs, shadow = [], []
+        golden = np.pi * (3.0 - np.sqrt(5.0))
+        for k in range(V3_KEY_SAMPLES):          # a Fibonacci disc: even coverage of the cone, no rings
+            r = np.tan(np.radians(V3_KEY_CONE_DEG)) * np.sqrt((k + 0.5) / V3_KEY_SAMPLES)
+            ang = k * golden
+            d = key + r * (np.cos(ang) * a + np.sin(ang) * b)
+            dirs.append(d / np.linalg.norm(d) * (V3_KEY_INTENSITY / V3_KEY_SAMPLES))
+            shadow.append(True)
+        for vec, inten in V3_DOME:
+            v = np.asarray(vec, float)
+            dirs.append(v / np.linalg.norm(v) * inten)
+            shadow.append(False)
+        return _set_lights(ctx, dev, dirs, shadow)
     key = KEY_DIR / np.linalg.norm(KEY_DIR)
     a = np.cross(key, [0.0, 0.0, 1.0])
     a /= np.linalg.norm(a)
@@ -312,6 +411,10 @@ def _lights(ctx, dev) -> None:
     for vec, inten in ((FILL_DIR, FILL_INTENSITY), (RIM_DIR, RIM_INTENSITY)):
         dirs.append(vec / np.linalg.norm(vec) * inten)
         shadow.append(False)
+    _set_lights(ctx, dev, dirs, shadow)
+
+
+def _set_lights(ctx, dev, dirs, shadow) -> None:
     n = len(dirs)
     ctx.lights_active = wp.array([True] * n, dtype=wp.bool, device=dev)
     ctx.lights_type = wp.array([1] * n, dtype=wp.int32, device=dev)
@@ -326,9 +429,11 @@ _PATCHED = False
 def _patch_lighting() -> None:
     """Newton's lighting function with a per-light intensity (|direction| for directional lights) and a larger shadow
     bias.  A copy of newton 1.5.0's ``create_compute_lighting_function``; the edits are marked."""
-    global _PATCHED
+    global _PATCHED, SHADOW_MIN_VISIBILITY
     if _PATCHED:
         return
+    if version() >= 3:
+        SHADOW_MIN_VISIBILITY = V3_SHADOW_MIN_VISIBILITY
     from newton._src.core import MAXVAL
     from newton._src.sensors.warp_raytrace import lighting, raytrace
 
