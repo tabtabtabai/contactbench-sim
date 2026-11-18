@@ -18,9 +18,12 @@ hemispheric ambient term, Lambert shading only):
   (``add_backdrop``) in place of the flat backdrop gradient.
 * LIGHTS: a soft key light (``KEY_SAMPLES`` shadow-casting directional lights jittered within ``KEY_CONE_DEG``, so
   shadow edges get a ``KEY_SAMPLES``-step penumbra), a fill and a rim light, each with its own intensity.
-* SHADOW ACNE: upstream offsets shadow rays 0.1 mm along the normal, which leaves speckles near the terminator of
-  curved, finely tessellated parts (the bulb). Version 2 offsets them by ``SHADOW_BIAS_M`` along the normal and the
-  light direction.
+* THE SPECKLED BULB: upstream shades the kit meshes with their flat triangle normals (they ship without vertex
+  normals), so finely tessellated round parts show a stipple of facet bands, worst on the bulb.  Version 2 gives the
+  rounded VISUAL-ONLY meshes (``SMOOTH``: the bulb, its socket, the round doorknob; their collision shapes are separate
+  and untouched) area-weighted vertex normals, which the raytracer interpolates (``smooth_normals``).  It also offsets
+  shadow rays by ``SHADOW_BIAS_M`` along the normal and the light direction (upstream: 0.1 mm along the normal),
+  against self-shadowing at the terminator once the shading normals are smooth.
 
 The last two need a per-light intensity and a shadow bias, which the raytracer does not expose, so version 2
 replaces Newton's ``lighting.create_compute_lighting_function`` with a copy that reads each light's intensity from
@@ -39,11 +42,11 @@ import warp as wp
 
 KEY_SAMPLES = 6
 KEY_CONE_DEG = 2.5
-KEY_INTENSITY = 0.90
-FILL_INTENSITY = 0.24
+KEY_INTENSITY = 1.00
+FILL_INTENSITY = 0.18
 RIM_INTENSITY = 0.22
 SHADOW_BIAS_M = 1.5e-3
-SHADOW_MIN_VISIBILITY = 0.25
+SHADOW_MIN_VISIBILITY = 0.15
 KEY_DIR = np.array([-0.5, 0.6, -0.62])     # the v1 key's travel direction, kept so shadows fall the same way
 FILL_DIR = np.array([0.72, -0.36, -0.58])
 RIM_DIR = np.array([0.15, -0.85, -0.45])   # from behind the scene, toward the cameras
@@ -187,6 +190,37 @@ def apply_colors(model) -> None:
         if mat is not None:
             colors[i] = SPEC[mat][0]
     model.shape_color.assign(colors.astype(np.float32))
+
+
+# meshes whose visual-only shape gets smooth vertex normals (round parts; sharp-edged parts stay faceted, since the
+# meshes share vertices across their creases and a crease would need the BVH mesh rebuilt)
+SMOOTH = r"^kit/(bulb|socket)/|^kit/doorknob_module/doorknob_\d"
+VISUAL_ONLY = 1          # shape_flags: visible, no collision
+
+
+def smooth_normals(model) -> None:
+    """Area-weighted vertex normals on the SMOOTH visual-only meshes, before any camera is built (the raytracer reads
+    them when it builds its mesh data).  Visual-only shapes only: collision never sees them."""
+    if not enabled():
+        return
+    flags, types = model.shape_flags.numpy(), model.shape_type.numpy()
+    import newton
+    for i, lbl in enumerate(model.shape_label):
+        if int(types[i]) != int(newton.GeoType.MESH) or int(flags[i]) != VISUAL_ONLY:
+            continue
+        if not re.search(SMOOTH, str(lbl or "")):
+            continue
+        mesh = model.shape_source[i]
+        if mesh is None or getattr(mesh, "normals", None) is not None:
+            continue
+        V = np.asarray(mesh.vertices, np.float64)
+        F = np.asarray(mesh.indices, np.int64).reshape(-1, 3)
+        fn = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])      # area-weighted face normals
+        vn = np.zeros_like(V)
+        for k in range(3):
+            np.add.at(vn, F[:, k], fn)
+        vn /= np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-12)
+        mesh.normals = vn.astype(np.float32)
 
 
 # ── the backdrop ─────────────────────────────────────────────────────────────────────────────────────────────────

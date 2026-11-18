@@ -660,6 +660,7 @@ class Rig:
         from force_bench import render_v2
         render_v2.add_backdrop(self)        # render version 2 only: visual-only walls, appended last
         self.model = self.builder.finalize()
+        render_v2.smooth_normals(self.model)  # render version 2 only: smooth shading of round visual-only meshes
         self.model._force_bench_solver_options = dict(self.solver_options)
         if self.hard_joint_limits:
             self.limit_tuning = mujoco_hard_limits(
