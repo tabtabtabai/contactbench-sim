@@ -14,9 +14,8 @@ timeline (see JUDGE.md for every criterion, upstream vs here).  Detection rules 
               forced_door     the leaf opened >= 1 deg before the latch had ever cleared the strike (the row's own
                               "unlocked_by_knob_then_opened" can no longer pass)
               part_dropped    the bulb is off the socket axis by > 30 mm, or 30 mm below the socket top
-              force_limit     above 4x the finger drive's own force ceiling (the row's finger effort limit) for
-                              FORCE_LIMIT_FRAMES frames: per pad (door), or 2 pads' worth on the summed robot-object
-                              contact (bulb, dial, nut); never below FORCE_LIMIT_N
+              force_limit     either finger pad above a FIXED FORCE_LIMIT_N (150 N) for FORCE_LIMIT_FRAMES frames,
+                              whatever the grip setting (the user's rule)
               sim_diverged    a non-finite state
 """
 
@@ -94,18 +93,19 @@ class Adapter:
                              t_redo=round(float(t + self.ep.charged_s), 3))
             self.setback = None
 
-    def force_limit(self, summed: bool) -> float:
-        """4x the finger drive's own force ceiling (the row's finger effort limit), per pad, or for both pads when the
-        probe sums the hand's contacts; never below FORCE_LIMIT_N."""
-        ceiling = float(self.rig.model.joint_effort_limit.numpy()[7])
-        return max(FORCE_LIMIT_N, 4.0 * ceiling * (2.0 if summed else 1.0))
+    def force_limit(self, summed: bool = False) -> float:
+        """The irreversible contact-force limit: a FIXED 150 N on either finger pad (the user's rule, in the contract).
+        Independent of the grip setting: an earlier hand-relative limit (4x the finger effort ceiling) rose silently
+        with the squeeze (a G1 at 80 N got 320 N per pad)."""
+        return FORCE_LIMIT_N
 
     def _force(self, t, f, summed=False):
-        lim = self.force_limit(summed)
+        """f: the larger of the two pad forces this frame (N)."""
+        lim = FORCE_LIMIT_N
+        self.peak_pad_n = max(getattr(self, "peak_pad_n", 0.0), float(f))
         self.over = self.over + 1 if f > lim else 0
         if self.over == FORCE_LIMIT_FRAMES:
-            self._fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=round(lim, 1),
-                        measured="summed robot-object contact" if summed else "per pad")
+            self._fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=lim, measured="per pad")
 
     def _fatal(self, t, kind, **kw):
         """An irreversible event ends a policy's episode; the expert's is recorded but runs to its own end (its
@@ -347,7 +347,7 @@ class BulbAdapter(Adapter):
         kt, r = self.kt, self.ex.log[-1]
         c = lambda n: float(self._c(r, n))  # noqa: E731
         fL, fR, yaw = c("fL"), c("fR"), c("yaw")
-        self._force(t, c("robot"), summed=True)
+        self._force(t, max(fL, fR))
         ch = self.gripping.update(min(fL, fR) > self.PAD_N)
         if ch > 0:
             self.n_grips += 1
@@ -573,7 +573,7 @@ class DialAdapter(Adapter):
         if self.ep.done or not self.ex.log or self.t_judge is not None:
             return
         r = self.ex.log[-1]
-        self._force(t, r["robot"], summed=True)
+        self._force(t, max(r["fL"], r["fR"]))
         ch = self._grip_update(t, min(r["fL"], r["fR"]) > GRIP_N)
         err = abs(r["ang"] - self.target)
         if self.best_err is None or err < self.best_err - np.radians(10.0):
@@ -719,7 +719,7 @@ class NutAdapter(Adapter):
         if self.ep.done or not self.log or self.t_judge is not None:
             return
         _, z, rc, fl, fr = self.log[-1]
-        self._force(t, rc, summed=True)
+        self._force(t, max(fl, fr))
         self._grip_update(t, min(fl, fr) > 1.0)
         tips, nut = self._tips()
         if np.hypot(nut[0], nut[1]) > 0.010 or z > float(self.sn.Z_START) + 0.008 or z < -0.02:
