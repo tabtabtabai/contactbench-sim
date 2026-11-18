@@ -40,7 +40,8 @@ PELVIS_Z_CB = 0.793 - 0.8703        # the pelvis below the table top (Isaac setu
 FLOOR_CB = -0.8703
 TABLE_HALF = (0.30, 0.40)
 YAW_STEP = math.radians(5.0)
-YAW_MARGIN = math.radians(10.0)     # inside the measured window at both ends
+YAW_MARGIN = math.radians(25.0)     # inside the measured window at both ends (at 10 deg the pads' release at the
+#                                     window's low end let the arm jump 16 mm off the bulb's axis)
 YAW_SPAN_MAX = math.radians(300.0)
 IK_TOL = (0.001, math.radians(1.0))
 WRIST_MAX = 0.9                     # rad/s: our G1 scripted policies' wrist rule (<= 1 rad/s), 10 % inside it

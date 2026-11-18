@@ -405,6 +405,8 @@ class G1IK:
     screw expert speaks: the TCP is the Dex1 pad centre, its frame mapped by TCP_TO_HAND.  Every other joint is held
     at its start (joint-limit objective with lower = upper)."""
 
+    LIMIT_MARGIN = {"elbow": 0.15, "wrist": 0.25}   # rad inside the arm's limits, as the offline planner keeps
+
     def __init__(self, npz_path, pelvis_xform, side: str, start_q: dict):
         import newton.ik as ik
         b = newton.ModelBuilder()
@@ -426,6 +428,10 @@ class G1IK:
         dof = self.model.joint_qd_start.numpy()
         armdof = {int(dof[g["joints"][n]]) for n in self.arm}
         qs = self.model.joint_q_start.numpy()
+        for n in self.arm:                               # the planner's margins inside the elbow and wrist limits
+            m = self.LIMIT_MARGIN["elbow"] if "elbow" in n else self.LIMIT_MARGIN["wrist"] if "wrist" in n else 0.0
+            d0 = int(dof[g["joints"][n]])
+            lo[d0], hi[d0] = lo[d0] + m, hi[d0] - m
         for j in range(self.model.joint_count):          # lock every non-arm dof at its start value
             d0 = int(dof[j])
             if d0 in armdof or int(qs[j + 1] if j + 1 < len(qs) else len(q0)) - int(qs[j]) != 1:
