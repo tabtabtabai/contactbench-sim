@@ -4,8 +4,9 @@ Each judge keeps the row's own thresholds and replaces only what read the script
 timeline (see JUDGE.md for every criterion, upstream vs here).  Detection rules for the episode record:
 
   regrasp     both pads above GRIP_N for GRIP_FRAMES frames after having been below it (the literal count)
-  setback     the task's own progress went backwards: the knob turned back > 30 deg, the door fell > 5 deg, the
-              bulb backed out > 30 deg, or the bulb was re-gripped after it had been measured tight and released
+  setback     the task's own progress went backwards (clockwork-5 D1): the latch re-extended before the door had
+              opened, the door closed back below 5 deg after opening, the bulb backed out > 30 deg below its best,
+              or the bulb was re-gripped after it had been measured tight and released (a re-tighten)
   retry       a setback followed by a redo (progress rising again or a re-grip); stroke re-grips with progress
               holding are not retries (clockwork-5 D1)
   irreversible
@@ -25,7 +26,6 @@ from force_bench.policy_env.episode import closure
 
 GRIP_N, GRIP_FRAMES = 2.0, 3        # the door row's pads_check gate (2 N in every 3-frame window)
 BACKOUT_DEG = 30.0
-DOOR_FALL_DEG = 5.0
 FORCE_LIMIT_N, FORCE_LIMIT_FRAMES = 150.0, 4
 
 
@@ -135,6 +135,7 @@ class DoorAdapter(Adapter):
         self.max_knob = 0.0
         self.max_door = 0.0
         self.max_latch = 0.0
+        self._reext = self._closed = False
         self.door_deg = self.knob_deg = self.latch_mm = 0.0
         self.pads = (0.0, 0.0)
 
@@ -167,12 +168,19 @@ class DoorAdapter(Adapter):
             self._redo(t, "progress")
         self.max_knob = max(self.max_knob, self.knob_deg)
         self.max_door = max(self.max_door, self.door_deg)
-        if self.knob_deg < self.max_knob - BACKOUT_DEG and self.door_deg < 5.0:
-            self._set_back(t, "knob_backed_out", knob_deg=round(self.knob_deg, 1), max_knob_deg=round(self.max_knob, 1))
-            self.max_knob = self.knob_deg
-        if self.door_deg < self.max_door - DOOR_FALL_DEG:
-            self._set_back(t, "door_fell", door_deg=round(self.door_deg, 1), max_door_deg=round(self.max_door, 1))
+        # D1 setbacks: the latch re-extends (the knob let go or turned back before the door opened), or the door
+        # closes back below 5 deg after it had been opened
+        if self.t_clear is not None and self.latch_mm < self.jamb_mm and self.max_door < 5.0 and not self._reext:
+            self._reext = True
+            self._set_back(t, "latch_reextended", knob_deg=round(self.knob_deg, 1))
+        if self.latch_mm >= self.jamb_mm:
+            self._reext = False
+        if self.max_door >= 5.0 and self.door_deg < 5.0 and not self._closed:
+            self._closed = True
+            self._set_back(t, "door_closed_back", door_deg=round(self.door_deg, 1), max_door_deg=round(self.max_door, 1))
             self.max_door = self.door_deg
+        if self.door_deg >= 5.0:
+            self._closed = False
         self.success_online = self._held_open(self.HOLD_S)
 
     def _held_open(self, window) -> bool:
