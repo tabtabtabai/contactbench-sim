@@ -44,11 +44,15 @@ class EpisodeEvents:
     regrasps: int = 0
     notes: list = field(default_factory=list)
 
-    def retry(self, t, kind, **kw):
-        self.retry_events.append({"t": round(float(t), 3), "kind": kind, **kw})
+    offset = staticmethod(lambda: 0.0)   # set by the Episode: the latency charged so far (robot = world + charged)
+
+    def retry(self, t_robot, kind, **kw):
+        """t_robot: the setback's robot time (the adapter stamps it when the setback happens)."""
+        self.retry_events.append({"t": round(float(t_robot), 3), "kind": kind, **kw})
 
     def fatal(self, t, kind, **kw):
-        self.irreversible.append({"t": round(float(t), 3), "kind": kind, **kw})
+        """t: world (physics) time; recorded in robot time, the clock t_wall_s is on."""
+        self.irreversible.append({"t": round(float(t) + self.offset(), 3), "kind": kind, **kw})
 
 
 class _EndEpisode(Exception):
@@ -72,11 +76,13 @@ class Episode:
         self.t = 0.0
         self.frame = 0
         self.ev = EpisodeEvents()
+        self.ev.offset = lambda: self.charged_s
         self.done = False
         self.done_reason = None
         self.t_policy_end = None       # world time when the policy's part ended (before any judge phase)
         self.latency_s = 0.0           # summed policy request time (charged to the world clock in real time mode)
         self.charged_s = 0.0           # latency added to the robot clock WITHOUT stepping the world (charged mode)
+        self.settle_s = 0.0            # world time stepped while a request was out, settling first (charged mode)
         self.n_requests = 0
         self.expert_driven = False
         self.adapter = adapter_cls(self)
@@ -113,6 +119,28 @@ class Episode:
                 for _ in range(n):
                     rec._video_writer_mv().append_data(mv)
 
+    SETTLE_ARM_RAD_S = 0.02          # the robot has settled on its last target: every arm joint slower than this,
+    SETTLE_FINGER_M_S = 0.002        # and both fingers slower than this
+    SETTLE_CAP_S = 2.0               # at most this much world time is stepped before the world freezes
+
+    def settled(self) -> bool:
+        qd = self.rig.s0.joint_qd.numpy()[:ARM_DOF]
+        return bool(np.abs(qd[:7]).max() < self.SETTLE_ARM_RAD_S and np.abs(qd[7:9]).max() < self.SETTLE_FINGER_M_S)
+
+    def charge_settled(self, owed_s: float) -> float:
+        """Charged mode (sims/clockwork/CONTRACT.md): while a request is out the world keeps stepping, last targets
+        held, until the robot has settled (or SETTLE_CAP_S, or the whole owed latency, has passed); then it freezes
+        and the rest of the latency is charged.  Returns the world time stepped."""
+        stepped = 0.0
+        limit = min(self.SETTLE_CAP_S, max(0.0, owed_s))
+        while stepped + self.dt <= limit + 1e-9 and not self.done and not self.settled():
+            self.step(None)
+            self.adapter.check_end()
+            stepped += self.dt
+        self.settle_s += stepped
+        self.charge(max(0.0, owed_s - stepped))
+        return stepped
+
     # ── robot state (what a policy may see) ─────────────────────────────────────────────────────────────────────
     def joints(self) -> np.ndarray:
         return self.rig.s0.joint_q.numpy()[:ARM_DOF].astype(np.float32)
@@ -141,9 +169,10 @@ class Episode:
         self.rig.control.joint_target_q.assign(qt)
 
     def step_expert(self):
-        """The row's scripted expert for one frame (its own control callback, scenery included)."""
+        """The row's scripted expert for one frame (its own control callback, scenery included), on robot time (the
+        same as world time unless latency has been charged)."""
         self.expert_driven = True
-        self.control_cb(self.t)          # may raise StopRun: the expert's own ending
+        self.control_cb(self.robot_t)    # may raise StopRun: the expert's own ending
         self._physics(scenery_done=True)
 
     def _physics(self, scenery_done=False):

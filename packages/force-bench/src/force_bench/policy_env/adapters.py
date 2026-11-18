@@ -85,12 +85,13 @@ class Adapter:
         return ch
 
     def _set_back(self, t, kind, **kw):
-        if self.setback is None:
-            self.setback = {"t": t, "kind": kind, **kw}
+        if self.setback is None:                       # stamped in robot time (world + latency charged so far)
+            self.setback = {"t": t + self.ep.charged_s, "kind": kind, **kw}
 
     def _redo(self, t, how):
         if self.setback is not None:
-            self.ep.ev.retry(self.setback["t"], self.setback["kind"], redo=how, t_redo=round(float(t), 3))
+            self.ep.ev.retry(self.setback["t"], self.setback["kind"], redo=how,
+                             t_redo=round(float(t + self.ep.charged_s), 3))
             self.setback = None
 
     def force_limit(self, summed: bool) -> float:
