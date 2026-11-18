@@ -657,6 +657,8 @@ class Rig:
             # condim is a mujoco CUSTOM attribute, so it does not exist
             # until this has run -- registering it for the torsion knob too
             newton.solvers.SolverMuJoCo.register_custom_attributes(self.builder)
+        from force_bench import render_v2
+        render_v2.add_backdrop(self)        # render version 2 only: visual-only walls, appended last
         self.model = self.builder.finalize()
         self.model._force_bench_solver_options = dict(self.solver_options)
         if self.hard_joint_limits:

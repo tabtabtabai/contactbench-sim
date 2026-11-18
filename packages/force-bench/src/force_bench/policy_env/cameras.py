@@ -49,6 +49,8 @@ class PolicyCameras:
         self.cam = SensorTiledCamera(model=self.model)
         self.cam.default_render_config.enable_shadows = True
         self.cam.utils.create_default_light(enable_shadows=True)
+        from force_bench import render_v2
+        render_v2.configure_sensor(self.cam, self.model)   # render version 2 only (the poses, K and FOVs are unchanged)
         fovs = np.radians([scene_fov_deg, scene_fov_deg, wrist_fov_deg])
         self.rays = self.cam.utils.compute_camera_rays_pinhole(self.width, self.height, camera_fovs=fovs)
         self.color = self.cam.utils.create_color_image_output(self.width, self.height, 3)
