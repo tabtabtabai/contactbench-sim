@@ -60,6 +60,8 @@ def parse(argv=None):
     ap.add_argument("--traj", required=True, help="the IK trajectory and placement for this seed")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--name", default=None)
+    ap.add_argument("--part", choices=["knob", "handle"], default="knob",
+                    help="the doorknob (task 28) or the lever handle (task 29); the same door, spring and expert")
     return ap.parse_args(argv)
 
 
@@ -68,14 +70,16 @@ def main(argv=None):
     traj = json.loads(Path(a.traj).read_text())
     if traj.get("seed") != a.seed:
         raise SystemExit(f"{a.traj} is for seed {traj.get('seed')}, not {a.seed}")
-    rig = appendix_rig(a.name or NAME)
+    rig = appendix_rig(a.name or (NAME if a.part == "knob" else "turn_door_handle_open_door_flat_g1"))
     pelvis = wp.transform(wp.vec3(*traj["pelvis_cb"]), wp.quat_identity())
     g1 = add_g1(rig.builder, a.model, pelvis)
     rig.robot_base = pelvis
     # the table's near edge in front of the G1; the door at the row's (seeded) pose
     dk.TABLE_C = (float(traj["pelvis_cb"][0]) + 0.12 + dk.TABLE_HALF, dk.TABLE_C[1])
-    choice = {"Doorknob geometry": "Doorknob 1, 55mm diameter", "Amount of rotation to unlock": "60°",
-              "Rotation force": "5mm spring"}
+    choice = ({"Doorknob geometry": "Doorknob 1, 55mm diameter", "Amount of rotation to unlock": "60°",
+               "Rotation force": "5mm spring"} if a.part == "knob" else
+              {"Door handle geometry": "Handle 1", "Amount of rotation to unlock": "60°",
+               "Rotation force": "5mm spring"})
     pose, shift = door_pose(a.seed)
     h = build_door(rig, knob=choice, lock="90°", lock_params={"hold_retracted": True}, pose=pose)
     hk = h._modules["doorknob-module"]
