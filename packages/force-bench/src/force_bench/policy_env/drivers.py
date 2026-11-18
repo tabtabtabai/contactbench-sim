@@ -50,6 +50,7 @@ class ThinkingExpertDriver(ExpertDriver):
         self.think_s, self.every_s, self.mode = float(think_s), float(every_s), mode
         self.next_think = self.every_s
         self.policy_id = f"scripted-expert-thinking-{self.think_s:g}s-every-{self.every_s:g}s"
+        self.duration_scale = 1.0 + self.think_s / self.every_s     # the row's own duration, plus the thinking
 
     def advance(self, ep):
         if ep.robot_t + 1e-9 >= self.next_think:

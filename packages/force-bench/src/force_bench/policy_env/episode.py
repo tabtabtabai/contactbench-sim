@@ -302,7 +302,7 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
         driver.begin(ep)
         # the expert runs to its own ending (StopRun) or the row's own duration, never cut short by the online
         # success signal: the row's verdict windows are laid out on the expert's timeline
-        limit = float(duration) if driver.expert else float(budget_s)
+        limit = float(duration) * getattr(driver, "duration_scale", 1.0) if driver.expert else float(budget_s)
         try:
             while not ep.done:
                 if ep.robot_t >= limit - 1e-9:
