@@ -235,6 +235,11 @@ class _CameraVideos:
 def _row_argv(task: str, seed, extra=()):
     from force_bench.appendix_tasks.registry import BY_NAME
     from force_bench.cli import _run_plan
+    if task.startswith("module:"):                 # a task module outside the registry (an embodiment variant)
+        from types import SimpleNamespace
+        dotted = task[len("module:"):]
+        spec = SimpleNamespace(dotted=dotted, module=dotted.rsplit(".", 1)[-1])
+        return spec, [*(("--seed", str(seed)) if seed is not None else ()), *extra]
     spec = BY_NAME.get(task)
     if spec is None:
         raise SystemExit(f"unknown ContactBench row {task!r} (force-bench list)")
@@ -244,7 +249,7 @@ def _row_argv(task: str, seed, extra=()):
 
 
 def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_upstream: bool = True,
-            cameras: bool = True) -> dict:
+            cameras: bool = True, extra_argv=()) -> dict:
     """Build the row's scene, drive one episode with ``driver`` and judge it.  Returns the episode result (the
     record fields this module owns; ``record.py`` adds the contract's fields)."""
     import importlib
@@ -252,7 +257,7 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
     from force_bench.policy_env.adapters import adapter_for
     from force_bench.rig import Rig
 
-    spec, argv = _row_argv(task, seed)
+    spec, argv = _row_argv(task, seed, extra_argv)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     # the row writes under common.APPENDIX_OUT (resolved from TB_OUT_ROOT when force_bench is first imported, which

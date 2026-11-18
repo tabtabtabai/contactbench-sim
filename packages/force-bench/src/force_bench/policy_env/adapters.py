@@ -153,8 +153,10 @@ class DoorAdapter(Adapter):
             return
         _, th, ph, x = self.log[-1]
         self.door_deg, self.knob_deg, self.latch_mm = float(np.degrees(-th)), float(np.degrees(-ph)), x * 1e3
-        pl = self.rig.probes["fr3/fr3_leftfinger"].history[-1]["force"]
-        pr = self.rig.probes["fr3/fr3_rightfinger"].history[-1]["force"]
+        from force_bench.appendix_tasks._door_kit import pad_labels
+        la, lb = pad_labels(self.rig)
+        pl = self.rig.probes[la].history[-1]["force"]
+        pr = self.rig.probes[lb].history[-1]["force"]
         self.pads = (pl, pr)
         self.max_latch = max(self.max_latch, self.latch_mm)
         if self.door_deg < 1.0:
@@ -644,7 +646,7 @@ class DialAdapter(Adapter):
                 "t_end_s": round(float(t[-1]), 3), "final_error_deg": round(err, 2)}
 
 
-ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "turn_door_handle_open_door_flat": DoorAdapter,
+ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "turn_doorknob_open_door_flat_g1": DoorAdapter, "turn_door_handle_open_door_flat": DoorAdapter,
             "install_light_bulb": BulbAdapter, "turn_dial_to_target": DialAdapter}
 
 

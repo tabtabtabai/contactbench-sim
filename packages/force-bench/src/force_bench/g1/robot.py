@@ -18,6 +18,10 @@ import newton
 
 PREFIX = "g1/"
 FINGER_EFFORT = 40.0          # N per finger: the squeeze (Dex1 spec 5-120 N)
+ARM_KP_SCALE = 10.0           # the arm servo, stiffer than matrix's MuJoCo actuators (kp 300/80): the open-loop
+# scripted expert needs the hand within ~2 mm of its IK pose under gravity and contact (at 1x it sagged 15 mm and
+# drifted 28 mm off the knob's axis while turning).  The joint effort caps stay the G1's (25 / 5 N.m); the real G1
+# gets its tracking from the whole-body controller's gravity compensation instead.
 COLLIDE_BODIES = ("hand_Link1_2", "hand_Link1_3", "hand_Link2_2", "hand_Link2_3")
 
 
@@ -33,7 +37,8 @@ def _rot(q_wxyz) -> np.ndarray:
                      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
 
 
-def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, mu: float = 1.0) -> dict:
+def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, mu: float = 1.0,
+           arm_kp_scale: float = ARM_KP_SCALE) -> dict:
     """Returns {"bodies": {mujoco name: newton body}, "joints": {mujoco joint name: newton joint},
     "q_index": {joint name: joint_q index}, "shapes": {body name: [shape ids]}}."""
     d = np.load(npz_path, allow_pickle=False)
@@ -75,7 +80,8 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
             cxf = wp.transform(wp.vec3(*jpos), wp.quat_identity())
             kp, cap = drives.get(jn, (0.0, 0.0))
             finger = "finger" in jn
-            kd = (0.01 if finger else 0.05) * kp
+            kp = kp if finger else kp * arm_kp_scale
+            kd = (0.01 if finger else 0.04) * kp
             lo, hi = (float(v) for v in d["jnt_range"][j])
             kw = dict(parent_xform=pxf, child_xform=cxf, axis=wp.vec3(*d["jnt_axis"][j]), limit_lower=lo,
                       limit_upper=hi, target_ke=kp, target_kd=kd,
@@ -127,3 +133,37 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
 def q_indices(model: newton.Model, joints: dict) -> dict:
     qs = model.joint_q_start.numpy()
     return {n: int(qs[j]) for n, j in joints.items()}
+
+
+class SumProbe:
+    """One pad's force: the sum of several ForceProbes (a Dex1 finger is two colliding links)."""
+
+    def __init__(self, probes):
+        self.probes, self.history = probes, []
+
+    def sample(self, contacts, state, t):
+        rs = [p.sample(contacts, state, t) for p in self.probes]
+        rec = {"t": t, "force": float(sum(r["force"] for r in rs)), "friction": float(sum(r["friction"] for r in rs))}
+        self.history.append(rec)
+        return rec
+
+
+def camera_mounts(npz_path, side: str) -> list:
+    """The G1's own cameras from the exported model, as PolicyCameras mounts [(name, body label, T_body_cam, fovy)]:
+    the head camera (the d435 mount, Isaac's g1_front_camera; the left of the challenge's head pair) and the active
+    hand's wrist camera.  MuJoCo cameras look along -z with +y up, the GL convention the renderer uses."""
+    d = np.load(npz_path, allow_pickle=False)
+    if "cam_name" not in d:
+        return []
+    names = [str(n) for n in d["cam_name"]]
+    bodies = [str(n) for n in d["body_name"]]
+    want = {"head": "cam_left_high", "wrist": f"cam_{side}_wrist"}
+    out = []
+    for label, cam in want.items():
+        if cam not in names:
+            continue
+        i = names.index(cam)
+        T = np.eye(4)
+        T[:3, :3], T[:3, 3] = _rot(d["cam_quat"][i]), d["cam_pos"][i]
+        out.append((label, PREFIX + bodies[int(d["cam_body"][i])], T, float(d["cam_fovy"][i])))
+    return out

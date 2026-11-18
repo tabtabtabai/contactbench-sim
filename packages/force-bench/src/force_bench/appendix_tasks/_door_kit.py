@@ -215,6 +215,11 @@ def lock_probe_check(log_t, log_th, limit_deg=LOCK_PROBE_MAX_DEG):
                     "the thrown bolts in their strike pockets must hold the leaf shut"}
 
 
+def pad_labels(rig) -> tuple:
+    """The two pad probes: an embodiment's ``rig.pad_probes``, or the FR3's fingers."""
+    return tuple(getattr(rig, "pad_probes", ("fr3/fr3_leftfinger", "fr3/fr3_rightfinger")))
+
+
 def pads_check(rig, t0, t1, min_n=2.0, frames=3):
     """Per-pad contact force > ``min_n`` in every ``frames``-frame window (50 ms) of [t0, t1].
 
@@ -224,8 +229,8 @@ def pads_check(rig, t0, t1, min_n=2.0, frames=3):
     frames, so the gate takes, per pad, the minimum over the run of its rolling ``frames``-frame maximum; the raw
     per-frame minimum is reported too."""
     out, segs = {}, {}
-    for side in ("left", "right"):
-        segs[side] = np.array([r["force"] for r in rig.probes[f"fr3/fr3_{side}finger"].history if t0 <= r["t"] <= t1])
+    for side, label in zip(("left", "right"), pad_labels(rig)):
+        segs[side] = np.array([r["force"] for r in rig.probes[label].history if t0 <= r["t"] <= t1])
         f = segs[side]
         roll = np.array([f[max(0, i - frames + 1):i + 1].max() for i in range(frames - 1, len(f))]) if len(f) else f
         out[f"{side}_min_N"] = round(float(f.min()), 2)

@@ -39,23 +39,34 @@ def _mat_of(tf) -> np.ndarray:
 
 
 class PolicyCameras:
-    NAMES = ("left", "right", "wrist")
+    """LEFT/RIGHT on the scene camera, then the robot's own cameras: the rig's ``camera_mounts`` (an embodiment's
+    [(name, body label, T_body_camera in GL axes, vertical FOV deg)], e.g. the G1's head camera), or by default the
+    FR3's wrist camera."""
 
     def __init__(self, rig, *, scene_pos, scene_target, width=640, height=480, scene_fov_deg=45.0,
                  wrist_fov_deg=80.0, baseline_m=0.12):
         from newton.sensors import SensorTiledCamera
         self.rig, self.model = rig, rig.model
         self.width, self.height = int(width), int(height)
+        mounts = getattr(rig, "camera_mounts", None)
+        if mounts is None:
+            link7 = rig.body_index("fr3/fr3_link7")
+            l7_hand = (np.linalg.inv(_mat_of(rig.ik.body_pose("fr3/fr3_link7")))
+                       @ _mat_of(rig.ik.body_pose("fr3/fr3_hand")))
+            self.mounts = [("wrist", link7, l7_hand @ _hand_wrist_cam(), wrist_fov_deg)]
+        else:
+            self.mounts = [(n, rig.body_index(b), np.asarray(T, float), fov) for n, b, T, fov in mounts]
+        self.NAMES = ("left", "right", *[m[0] for m in self.mounts])
+        n = len(self.NAMES)
         self.cam = SensorTiledCamera(model=self.model)
         self.cam.default_render_config.enable_shadows = True
         self.cam.utils.create_default_light(enable_shadows=True)
-        fovs = np.radians([scene_fov_deg, scene_fov_deg, wrist_fov_deg])
+        fovs = np.radians([scene_fov_deg, scene_fov_deg, *[m[3] for m in self.mounts]])
         self.rays = self.cam.utils.compute_camera_rays_pinhole(self.width, self.height, camera_fovs=fovs)
-        self.color = self.cam.utils.create_color_image_output(self.width, self.height, 3)
-        self.sidx = self.cam.utils.create_shape_index_image_output(self.width, self.height, 3)
+        self.color = self.cam.utils.create_color_image_output(self.width, self.height, n)
+        self.sidx = self.cam.utils.create_shape_index_image_output(self.width, self.height, n)
         self.out = wp.zeros((self.height, self.width, 3), dtype=wp.uint8)
-        self.K = [self._k_from_rays(i) for i in range(3)]
-        # the stereo pair: the scene camera's pose, shifted -+ baseline/2 along its own right axis
+        self.K = [self._k_from_rays(i) for i in range(n)]
         M = _mat_of(lookat_transform(scene_pos, scene_target))      # camera-to-world, GL axes
         right = M[:3, 0]
         self.scene_world = []
@@ -63,10 +74,7 @@ class PolicyCameras:
             Mi = M.copy()
             Mi[:3, 3] = M[:3, 3] + s * baseline_m * right
             self.scene_world.append(Mi)
-        self.link7 = rig.body_index("fr3/fr3_link7")
-        self.l7_hand = (np.linalg.inv(_mat_of(rig.ik.body_pose("fr3/fr3_link7")))
-                        @ _mat_of(rig.ik.body_pose("fr3/fr3_hand")))
-        self.root = _mat_of(rig.robot_base)                          # fr3_link0 in the world
+        self.root = _mat_of(rig.robot_base)                          # the robot's root in the world
         self.root_inv = np.linalg.inv(self.root)
         self._cache = None
 
@@ -80,19 +88,8 @@ class PolicyCameras:
         cx, cy = -tx[0, 0] * fx, ty[0, 0] * fy
         return [[float(fx), 0.0, float(cx)], [0.0, float(fy), float(cy)], [0.0, 0.0, 1.0]]
 
-    def _wrist_world(self, bq) -> np.ndarray:
-        H = _mat_of(bq[self.link7]) @ self.l7_hand
-        p = H[:3, :3] @ WRIST_IN_HAND + H[:3, 3]
-        tgt = H[:3, :3] @ WRIST_LOOK_IN_HAND + H[:3, 3]
-        fwd = (tgt - p) / np.linalg.norm(tgt - p)
-        up_hint = H[:3, 0]                                           # the camera's own side up: the fingers low in
-#                                                                      the image
-        x = np.cross(fwd, up_hint)
-        x /= np.linalg.norm(x)
-        y = np.cross(x, fwd)
-        M = np.eye(4)
-        M[:3, 0], M[:3, 1], M[:3, 2], M[:3, 3] = x, y, -fwd, p      # GL: looks along -z
-        return M
+    def _robot_worlds(self, bq) -> list:
+        return [_mat_of(bq[b]) @ T for _, b, T, _ in self.mounts]
 
     def capture(self, t_s: float) -> dict:
         """The three views and their calibration at the current state (cached for the frame: a policy request and
@@ -106,7 +103,7 @@ class PolicyCameras:
     def _render(self, t_s: float) -> dict:
         state = self.rig.s0
         bq = state.body_q.numpy()
-        worlds = [*self.scene_world, self._wrist_world(bq)]
+        worlds = [*self.scene_world, *self._robot_worlds(bq)]
         tfs = [wp.transformf(wp.vec3f(*M[:3, 3]), wp.quatf(*_quat_xyzw(M[:3, :3]))) for M in worlds]
         cam_tf = wp.array([[tf] for tf in tfs], dtype=wp.transformf)
         self.model.bvh_refit_shapes(state)
@@ -123,6 +120,18 @@ class PolicyCameras:
             calib[name] = {"frame": "robot_root", "convention": "opencv", "K": self.K[ci], "T_base_camera":
                            T.tolist(), "capture_time_s": float(t_s), "resolution": [self.width, self.height]}
         return {"images": images, "calibration": calib}
+
+
+def _hand_wrist_cam() -> np.ndarray:
+    """The FR3 wrist camera in the hand frame (GL axes): beside the hand, looking at the pad centre."""
+    p, tgt = WRIST_IN_HAND, WRIST_LOOK_IN_HAND
+    fwd = (tgt - p) / np.linalg.norm(tgt - p)
+    x = np.cross(fwd, np.array([1.0, 0.0, 0.0]))
+    x /= np.linalg.norm(x)
+    y = np.cross(x, fwd)
+    M = np.eye(4)
+    M[:3, 0], M[:3, 1], M[:3, 2], M[:3, 3] = x, y, -fwd, p
+    return M
 
 
 def _quat_xyzw(R) -> tuple:
