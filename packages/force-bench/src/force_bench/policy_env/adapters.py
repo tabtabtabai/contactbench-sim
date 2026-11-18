@@ -647,7 +647,8 @@ class DialAdapter(Adapter):
 
 
 ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "turn_doorknob_open_door_flat_g1": DoorAdapter, "turn_door_handle_open_door_flat": DoorAdapter,
-            "install_light_bulb": BulbAdapter, "turn_dial_to_target": DialAdapter}
+            "install_light_bulb": BulbAdapter, "turn_dial_to_target": DialAdapter,
+            "turn_dial_to_target_g1": DialAdapter}
 
 
 def adapter_for(module: str):

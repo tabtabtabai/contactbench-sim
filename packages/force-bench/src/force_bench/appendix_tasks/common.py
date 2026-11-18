@@ -122,7 +122,7 @@ def sample_start(placements: dict[str, Placement], seed: int | None, gap: float 
 
 
 def robot_body_indices(model) -> list[int]:
-    return [i for i, lbl in enumerate(model.body_label) if str(lbl).startswith("fr3/")]
+    return [i for i, lbl in enumerate(model.body_label) if str(lbl).startswith(("fr3/", "g1/"))]   # FR3 or G1 (g1-dex1)
 
 
 class RobotContactProbe:
