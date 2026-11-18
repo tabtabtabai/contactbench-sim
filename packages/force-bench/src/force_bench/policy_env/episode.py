@@ -76,6 +76,7 @@ class Episode:
         self.done_reason = None
         self.t_policy_end = None       # world time when the policy's part ended (before any judge phase)
         self.latency_s = 0.0           # summed policy request time (charged to the world clock in real time mode)
+        self.charged_s = 0.0           # latency added to the robot clock WITHOUT stepping the world (charged mode)
         self.n_requests = 0
         self.expert_driven = False
         self.adapter = adapter_cls(self)
@@ -87,6 +88,30 @@ class Episode:
             if video_dir is not None:
                 self.videos = _CameraVideos(Path(video_dir), self.cams.NAMES, self.VIDEO_HZ)
                 self._record_views()
+
+    @property
+    def robot_t(self) -> float:
+        """Robot time: world time stepped plus latency charged without stepping (charged mode; 0 otherwise)."""
+        return self.t + self.charged_s
+
+    def charge(self, seconds: float):
+        """Charged mode (clockwork-5 D9): the robot clock moves on by ``seconds`` while the world stands still (the
+        scenes are static under held targets).  The videos repeat the held frame so they stay at 1x robot time."""
+        if seconds <= 0 or self.done:
+            return
+        self.charged_s += float(seconds)
+        if self.videos:
+            self.videos.hold_to(self.robot_t)
+        rec = self.rig.rec
+        if rec is not None and rec.frames:
+            n = int(round(seconds * self.fps))
+            last = rec.frames[-1]
+            for _ in range(n):
+                rec._video_writer().append_data(last)
+            if rec.multiview and rec._writer_mv is not None:
+                mv = rec._mv_host.numpy()
+                for _ in range(n):
+                    rec._video_writer_mv().append_data(mv)
 
     # ── robot state (what a policy may see) ─────────────────────────────────────────────────────────────────────
     def joints(self) -> np.ndarray:
@@ -167,7 +192,7 @@ class Episode:
         if not self.done:
             self.done, self.done_reason = True, reason
             if self.t_policy_end is None:
-                self.t_policy_end = self.t
+                self.t_policy_end = self.robot_t
 
 
 class _CameraVideos:
@@ -177,11 +202,19 @@ class _CameraVideos:
         self.paths = {n: folder / f"camera_{n}.mp4" for n in self.names}
         self.w = {}
         self._ff = imageio_ffmpeg
+        self.last, self.count = None, 0
 
     def __bool__(self):
         return True
 
+    def hold_to(self, robot_t: float):
+        """Repeat the last frame until the video covers robot_t (charged latency)."""
+        while self.last is not None and self.count < int(robot_t * self.fps) + 1:
+            self.append(self.last)
+
     def append(self, images: dict):
+        self.last = images
+        self.count += 1
         for n in self.names:
             img = np.ascontiguousarray(images[n])
             if n not in self.w:
@@ -243,7 +276,7 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
         limit = float(duration) if driver.expert else float(budget_s)
         try:
             while not ep.done:
-                if ep.t >= limit - 1e-9:
+                if ep.robot_t >= limit - 1e-9:
                     ep.end("duration" if driver.expert else "budget")
                     break
                 driver.advance(ep)       # one or more frames (a real-time request steps the world while it waits)
