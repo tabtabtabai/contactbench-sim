@@ -29,7 +29,7 @@ The last two need a per-light intensity and a shadow bias, which the raytracer d
 replaces Newton's ``lighting.create_compute_lighting_function`` with a copy that reads each light's intensity from
 the length of its direction vector and uses the larger bias (``_patch_lighting``; Newton 1.5.0).  The renderer has
 no specular term and no transparency: metal and glass are carried by their textures and colors only (see
-PHOTOREAL.md in the clockwork-5 notes for what a physically based path would take).
+gs://tabtabtab-forge/clockwork-5/render-v2/PHOTOREAL.md for what a physically based path would take).
 """
 
 from __future__ import annotations
