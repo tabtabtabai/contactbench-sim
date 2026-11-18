@@ -21,13 +21,24 @@ timeline (see JUDGE.md for every criterion, upstream vs here).  Detection rules 
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from force_bench.policy_env.episode import closure
 
 GRIP_N, GRIP_FRAMES = 2.0, 3        # the door row's pads_check gate (2 N in every 3-frame window)
 BACKOUT_DEG = 30.0
-FORCE_LIMIT_N, FORCE_LIMIT_FRAMES = 150.0, 4
+FORCE_LIMIT_N = 150.0
+# How long a finger must stay above FORCE_LIMIT_N for force_limit to fire. 4 consecutive frames (67 ms at 60 Hz) is
+# the rule every FR3 run used; 1 is "any single frame". An explicit setting (TB_FORCE_LIMIT_FRAMES) until the contract
+# fixes the rule; every record carries force_limit_rule.
+FORCE_LIMIT_FRAMES = int(os.environ.get("TB_FORCE_LIMIT_FRAMES", "4"))
+
+
+def force_limit_rule() -> str:
+    return (f"per-finger contact force (each finger body's total over its shapes) > {FORCE_LIMIT_N:g} N for "
+            f"{FORCE_LIMIT_FRAMES} consecutive frame(s) at 60 Hz, fixed, independent of the grip setting")
 
 
 class _Run:
