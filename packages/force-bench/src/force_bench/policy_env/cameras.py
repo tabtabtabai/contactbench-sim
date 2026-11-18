@@ -20,7 +20,7 @@ import warp as wp
 from force_bench.recorder import BG_BOTTOM, BG_TOP, _resolve_frame_kernel, lookat_transform
 
 GL_TO_CV = np.diag([1.0, -1.0, -1.0])
-WRIST_IN_HAND = np.array([0.095, 0.0, 0.030])      # hand frame: z toward the fingers, y the finger travel; the camera
+WRIST_IN_HAND = np.array([0.075, 0.0, 0.065])      # hand frame: z toward the fingers, y the finger travel; the camera
 #                                                     sits beside the hand, across the fingers, so neither finger hides
 #                                                     the part between them
 WRIST_LOOK_IN_HAND = np.array([0.0, 0.0, 0.105])   # the pads' centre
