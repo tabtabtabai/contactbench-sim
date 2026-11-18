@@ -37,7 +37,8 @@ from force_bench.appendix_tasks._door_kit import (LOCK_PROBE_NM, LOCK_PROBE_S, H
                                                   door_pose, drawn_shapes, joint_reader, lock_probe_check,
                                                   pads_check)
 from force_bench.appendix_tasks.common import StopRun, appendix_rig
-from force_bench.g1.robot import SumProbe, add_g1, apply_look, camera_mounts, q_indices
+from force_bench.g1.robot import (SumProbe, add_g1, apply_look, camera_mounts, floor_and_table, init_pose,
+                                  q_indices)
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver
 
@@ -82,6 +83,8 @@ def main(argv=None):
                "Rotation force": "5mm spring"})
     pose, shift = door_pose(a.seed)
     h = build_door(rig, knob=choice, lock="90°", lock_params={"hold_retracted": True}, pose=pose)
+    if "floor_cb" in traj:                       # the G1 on its floor, a solid table under the board (Isaac setup)
+        floor_and_table(rig.builder, float(traj["floor_cb"]), dk.TABLE_C, (dk.TABLE_HALF, dk.TABLE_HALF))
     hk = h._modules["doorknob-module"]
     knob, leaf = h.bodies["knob"], h.bodies["leaf"]
     # contact: only the Dex1 finger boxes touch the knob, through its grasp hull; nothing of the G1 touches the leaf
@@ -100,7 +103,7 @@ def main(argv=None):
         rig.probes[f"g1/pad{i}"] = SumProbe([rig.probes.pop(lb) for lb in links[i]])
     rig.pad_probes = ("g1/pad1", "g1/pad2")
     rig.camera_mounts = camera_mounts(a.model, side)
-    apply_look(rig.model)                        # after the recorder's palette (finalize)
+    apply_look(rig.model, g1)                    # the G1's own colours, after the recorder's palette (finalize)
     rig.solver = make_solver(rig.model, iterations=24, **{**rig.solver_options, "impratio": IMPRATIO})
     probe = HingeProbe(rig, h)
     jq = joint_reader(rig, h)
@@ -110,13 +113,20 @@ def main(argv=None):
     fingers = [f"{side}_dex1_finger_joint_1", f"{side}_dex1_finger_joint_2"]
     tq_index = {n: int(tqs[g1["joints"][n]]) for n in [*arm_names, *fingers]}
     tips = [g1["bodies"][f"{side}_hand_Link{i}_3"] for i in (1, 2)]
-    # the approach on the clock: from the pre-grasp (clear of the door, see the docstring) to the squeeze
-    way = traj["waypoints"][1:traj["i_close"] + 1]
+    # the approach on the clock: from the reset pose (held while the lock probe runs) up, across and down to the
+    # squeeze.  Older trajectories started at the arm's home pose, inside the door: those start at the pre-grasp.
+    first = 0 if "floor_cb" in traj else 1
+    way = traj["waypoints"][first:traj["i_close"] + 1]
     t0 = way[0][0]
     way = [(0.0, way[0][1], way[0][2])] + [(w[0] - t0 + PRE_HOLD, w[1], w[2]) for w in way]
     ts = np.array([w[0] for w in way])
     Q = np.array([w[1] for w in way])
-    G = np.array([traj["tau_g"][1]] + traj["tau_g"][1:traj["i_close"] + 1])
+    G = np.array([traj["tau_g"][first]] + traj["tau_g"][first:traj["i_close"] + 1])
+    ret = traj.get("retreat") or []
+    RQ = np.array([w[1] for w in ret]) if ret else None
+    RG = np.array(traj.get("retreat_tau_g") or [])
+    RT = np.array([w[0] for w in ret]) if ret else None
+    partial = not traj["lift_table"]["deg"]
     modes = [w[2] for w in way]
     T_turn = {k: np.asarray(v) for k, v in traj["turn_table"].items()}
     T_lift = {k: np.asarray(v) for k, v in traj["lift_table"].items()}
@@ -125,6 +135,9 @@ def main(argv=None):
     clear_m = (JAMB_CLEAR_MM + CLEAR_MARGIN_MM) * 1e-3
     q0 = rig.s0.joint_q.numpy()
     qt0 = rig.control.joint_target_q.numpy()
+    for n, v in init_pose(a.model).items():       # both arms in the reset pose; the idle one holds it throughout
+        if n in g1["joints"]:
+            q0[qi[n]], qt0[int(tqs[g1["joints"][n]])] = v, v
     for n, v in zip(arm_names, Q[0]):
         q0[qi[n]], qt0[tq_index[n]] = v, v
     for n in fingers:
@@ -165,17 +178,42 @@ def main(argv=None):
         elif ph in ("turn", "pause"):
             if latch < clear_m:                   # still in the strike: advance, bounded ahead of the knob
                 st["psi"] = min(st["psi"] + TURN_RATE * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
+                if partial and st["psi"] >= T_turn["deg"][-1] - 1e-6 and ph == "turn":
+                    go("pause", t)                # one grasp reaches no further (a partial plan): stop turning
             elif ph == "turn":
                 go("pause", t)
             q, g = table(T_turn, st["psi"])
-            if ph == "pause" and t - st["t_phase"] >= PAUSE_S:
-                go("lift", t)
+            if ph == "pause" and t - st["t_phase"] >= PAUSE_S + (1.0 if partial else 0.0):
+                go("release" if partial else "lift", t)
+        elif ph == "release":                     # partial: open where the turn ended
+            q, g = table(T_turn, st["psi"])
+            close = False
+            if t - st["t_phase"] >= 0.5:
+                st["psi_open"] = st["psi"]
+                go("back", t)
+        elif ph == "back":                        # turn the open hand back to the grasp angle
+            u = min(1.0, (t - st["t_phase"]) / 1.0)
+            q, g = table(T_turn, st["psi_open"] * (1.0 - u))
+            close = False
+            if u >= 1.0:
+                go("retreat", t)
+        elif ph in ("retreat", "still"):          # straight up, back over the reset pose's hand, down into it
+            tau_r = min(t - st["t_phase"], RT[-1]) if ph == "retreat" else RT[-1]
+            k = int(np.clip(np.searchsorted(RT, tau_r, side="right") - 1, 0, len(RT) - 2))
+            s_ = float(np.clip((tau_r - RT[k]) / max(1e-9, RT[k + 1] - RT[k]), 0, 1))
+            q, g = RQ[k] + s_ * (RQ[k + 1] - RQ[k]), RG[k] + s_ * (RG[k + 1] - RG[k])
+            close = False
+            if ph == "retreat" and tau_r >= RT[-1]:
+                go("still", t)
+            if ph == "still" and t - st["t_phase"] >= 1.0:
+                raise StopRun
         elif ph in ("lift", "hold"):
             if latch < clear_m and door_deg < 5.0:   # the latch slipped back before the door opened: turn again
                 st["psi"] = min(st["psi"] + TURN_RATE * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
-            st["phi"] = min(st["phi"] + LIFT_RATE * dt, door_deg + LIFT_LEAD, OPEN_TO_DEG)
+            open_to = min(OPEN_TO_DEG, float(T_lift["deg"][-1]))   # as far as the arm reaches (>= 10 deg)
+            st["phi"] = min(st["phi"] + LIFT_RATE * dt, door_deg + LIFT_LEAD, open_to)
             q, g = table(T_lift, st["phi"])
-            if ph == "lift" and st["phi"] >= OPEN_TO_DEG and door_deg >= OPEN_TO_DEG - 1.0:
+            if ph == "lift" and st["phi"] >= open_to and door_deg >= open_to - 1.0:
                 go("hold", t)
             if ph == "hold" and t - st["t_phase"] >= HOLD_S:
                 raise StopRun

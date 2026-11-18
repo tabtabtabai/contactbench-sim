@@ -62,7 +62,7 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
         T = np.eye(4)
         T[:3, :3], T[:3, 3] = _rot(d["body_quat"][b]), d["body_pos"][b]
         Xw[b] = (base @ T) if parent[b] == 0 else Xw[parent[b]] @ T
-    out = {"bodies": {}, "joints": {}, "q_index": {}, "shapes": {}}
+    out = {"bodies": {}, "joints": {}, "q_index": {}, "shapes": {}, "colors": {}}
     joints = []
     for b in range(1, len(names)):
         R = _rot(d["body_iquat"][b])
@@ -117,9 +117,11 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
                     continue                                                    # MuJoCo's invisible collision copy
                 cfg = newton.ModelBuilder.ShapeConfig(has_shape_collision=False, has_particle_collision=False,
                                                       density=0.0)
-                sids.append(builder.add_shape_mesh(nb, xform=gx, mesh=newton.Mesh(v, f.ravel()), cfg=cfg,
-                                                   color=wp.vec3(*[float(c) for c in rgba[:3]]),
-                                                   label=f"{PREFIX}{names[b]}_vis{g}"))
+                sid = builder.add_shape_mesh(nb, xform=gx, mesh=newton.Mesh(v, f.ravel()), cfg=cfg,
+                                             color=wp.vec3(*[float(c) for c in rgba[:3]]),
+                                             label=f"{PREFIX}{names[b]}_vis{g}")
+                sids.append(sid)
+                out["colors"][sid] = [float(c) for c in rgba[:3]]
         if collide and verts_body:
             V = np.vstack(verts_body)
             lo, hi = V.min(0), V.max(0)
@@ -198,27 +200,37 @@ def variant_params() -> dict:
     }
 
 
-# the real G1's look (visual only): dark grey body shells, silver-grey joint housings, black Dex1 hands
-G1_SHELL, G1_JOINT, G1_HAND = (0.13, 0.13, 0.14), (0.58, 0.59, 0.61), (0.04, 0.04, 0.045)
-_SHELLS = ("pelvis", "torso", "knee", "elbow", "head", "logo", "hip_pitch", "shoulder_pitch", "waist_yaw")
-
-
-def apply_look(model: newton.Model) -> None:
-    """Colour every g1/ shape like the real robot, after the recorder's studio palette (which gives each link a
-    random bright colour).  kit_look leaves robot shapes alone, so this sticks."""
+# the G1's own look (visual only): the model's colours, which are the Unitree URDF's ("white" 0.7 grey on 29 visuals,
+# "dark" 0.2 grey on 7) and the Isaac Dex1's (~0.015 black jaws); the recorder's studio palette overwrites them
+def apply_look(model: newton.Model, g1: dict) -> None:
+    """Restore every G1 shape's own colour after the recorder's palette (finalize).  kit_look leaves robot shapes
+    alone, so this sticks."""
     cols = model.shape_color.numpy().copy()
-    sb = model.shape_body.numpy()
-    bl = [str(b) for b in model.body_label]
-    for i, lbl in enumerate(model.shape_label):
-        body = bl[int(sb[i])] if sb[i] >= 0 else ""
-        if not body.startswith(PREFIX):
-            continue
-        name = body[len(PREFIX):]
-        if "hand" in name or "dex1" in name or "finger" in name:
-            c = G1_HAND
-        elif any(k in name for k in _SHELLS):
-            c = G1_SHELL
-        else:
-            c = G1_JOINT
-        cols[i] = c
+    for sid, rgb in g1["colors"].items():
+        cols[sid] = rgb
     model.shape_color.assign(np.asarray(cols, dtype=np.float32))
+
+
+def floor_and_table(builder: newton.ModelBuilder, floor_z: float, table_xy, half_xy) -> None:
+    """The G1 stands on a floor below the ContactBench table top (z = 0): move the ground plane down to the floor and
+    put a solid table under the board, so the legs are on the floor (the rig's ground plane sits at the table top)."""
+    for i, lbl in enumerate(builder.shape_label):
+        if lbl and "ground" in str(lbl):
+            X = builder.shape_transform[i]
+            builder.shape_transform[i] = wp.transform(wp.vec3(X[0], X[1], X[2] + floor_z),
+                                                      wp.quat(X[3], X[4], X[5], X[6]))
+    cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5)
+    builder.add_shape_box(-1, xform=wp.transform(wp.vec3(table_xy[0], table_xy[1], 0.5 * (floor_z - 0.01)),
+                                                 wp.quat_identity()),
+                          hx=float(half_xy[0]), hy=float(half_xy[1]), hz=float(0.5 * (-0.01 - floor_z)),
+                          cfg=cfg, label="table_base")
+
+
+def init_pose(npz_path) -> dict:
+    """The reset pose of both arms (joint name -> rad), from the exported model."""
+    d = np.load(npz_path, allow_pickle=False)
+    if "arm_init_json" not in d:
+        return {}
+    init = json.loads(str(d["arm_init_json"]))
+    names = ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow", "wrist_roll", "wrist_pitch", "wrist_yaw")
+    return {f"{side}_{n}_joint": float(v) for side, vals in init.items() for n, v in zip(names, vals)}
