@@ -414,6 +414,7 @@ class G1IK:
             if n in qi:
                 b.joint_q[qi[n]] = float(v)
         self.model = b.finalize()
+        self.g1 = g                                      # the private model's {bodies, joints, ...}
         self.side = side
         self.hand = PREFIX + f"{side}_hand_base_link"
         self.ee = list(self.model.body_label).index(self.hand)
