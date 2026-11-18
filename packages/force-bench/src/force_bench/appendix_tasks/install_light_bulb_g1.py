@@ -36,7 +36,9 @@ from force_bench.robot.franka import down_grasp_quat
 
 NAME = "install_light_bulb_g1"
 SIDE = "right"
-STANCE = (0.35, -0.15)              # m: the socket's nominal axis ahead of / to the left of the pelvis
+STANCE = (0.30, -0.03)              # m: the socket's nominal axis ahead of / to the left of the pelvis: the one
+#                                     stance whose top-down window leaves >= 60 deg per stroke at the most of seeds
+#                                     0-9 (8/10; g1_bulb_stance_search.py)
 PELVIS_Z_CB = 0.793 - 0.8703        # the pelvis below the table top (Isaac setup)
 FLOOR_CB = -0.8703
 TABLE_HALF = (0.30, 0.40)
