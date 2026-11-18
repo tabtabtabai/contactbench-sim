@@ -38,7 +38,10 @@ def _rot(q_wxyz) -> np.ndarray:
                      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
 
 
-def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, mu: float = 1.0,
+PAD_MU = float(os.environ.get("G1_PAD_MU", 1.0))   # matrix's MuJoCo Dex1 contact mu; the kit's FR3 elastomer pads: 1.4
+
+
+def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, mu: float = PAD_MU,
            arm_kp_scale: float = ARM_KP_SCALE) -> dict:
     """Returns {"bodies": {mujoco name: newton body}, "joints": {mujoco joint name: newton joint},
     "q_index": {joint name: joint_q index}, "shapes": {body name: [shape ids]}}."""
