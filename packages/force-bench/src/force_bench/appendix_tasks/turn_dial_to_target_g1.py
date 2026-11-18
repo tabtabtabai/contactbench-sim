@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -42,7 +43,7 @@ FINGER_OPEN, FINGER_CLOSE = -0.02, 0.0245      # Dex1 finger joints: 83 mm open;
 PRE_HOLD = 0.4
 TURN_RATE, TURN_LEAD, TRIM_DEG = 40.0, 12.0, 2.0   # deg/s; at most this far ahead of the measured dial; done within
 T_SETTLE, T_OPEN, T_RETREAT = 0.3, 0.5, 1.2
-TIMEOUT_S = 40.0
+TIMEOUT_S = float(os.environ.get("G1_MAX_T", 40.0))   # G1_MAX_T: a short pre-flight run
 CAM_POS, CAM_TARGET = np.array([0.30, -0.35, 0.30]), np.array([-0.05, 0.05, 0.04])
 
 

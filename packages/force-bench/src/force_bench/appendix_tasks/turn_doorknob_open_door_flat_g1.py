@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -52,7 +53,8 @@ TURN_RATE, TURN_LEAD = 30.0, 15.0               # deg/s of commanded knob turn; 
 CLEAR_MARGIN_MM = 0.1                           # turn until the measured latch is this far past the jamb face
 PAUSE_S = 0.4
 LIFT_RATE, LIFT_LEAD = 12.0, 3.0                # deg/s of commanded door angle; at most this far ahead of the door
-OPEN_TO_DEG, HOLD_S, TIMEOUT_S = 45.0, 1.6, 40.0
+OPEN_TO_DEG, HOLD_S = 45.0, 1.6
+TIMEOUT_S = float(os.environ.get("G1_MAX_T", 40.0))   # G1_MAX_T: a short pre-flight run
 CAM_POS, CAM_TARGET = np.array([0.55, -0.55, 0.55]), np.array([-0.08, 0.20, 0.05])
 
 
