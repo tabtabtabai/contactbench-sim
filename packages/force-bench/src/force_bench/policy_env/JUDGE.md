@@ -11,13 +11,14 @@ agree (clockwork-5 D3).
 |---|---|---|
 | `locked_at_start` | the hidden lock probe (1.5 N·m at the hinge, 0.05–0.45 s) moves the leaf < 0.6° | identical; the env applies the probe whatever drives the arm |
 | `unlocked_by_knob_then_opened` | the latch passes the jamb, the leaf moves < 1° before that, and the final angle is ≥ 5° | identical |
-| `finger_grip_sustained` | per pad > 2 N in every 3-frame window from the expert's squeeze + 0.2 s (`T[2]+0.2`) to `T[-1]` | same gate, from latch clear to the episode end (the door is lifted through the knob); a policy that regrasps before unlocking is not failed for it, since it scores as a retry instead |
+| `finger_grip_sustained` | per pad > 2 N in every 3-frame window from the expert's squeeze + 0.2 s (`T[2]+0.2`) to `T[-1]` | same gate, from the latch clearing, or the start of the final opening (the last frame the door was shut, < 1°) if that is later, to the episode end. The opening that counts must be lifted through the knob; an earlier opening that lost its grip costs attempts instead |
 | `motion_stopped_door_held_open` | over the last 1 s, TCP drift < 3 mm, door range < 1°, final ≥ 5° | identical (the last 1 s of the episode) |
 | `gear_coupling`, penetration, physics QA | integrity of the mechanism model | in the upstream verdict on the same rollout |
 
-Online success signal: the latch has cleared, both pads are gripping, and the door has stayed ≥ 5° for the last
-1 s with the TCP still. The episode ends when that holds, which is exactly when `motion_stopped_door_held_open` can
-pass.
+Online success signal: the judge would pass now. That means the latch has cleared, and both pads have passed the
+grip gate without a break since the final opening began. It also means the door has stayed ≥ 5° for the last 1 s
+with the TCP still. The episode ends when that holds. (Up to fork 274187c it checked the grip only at that instant: one
+native-flagship episode ended on a one-finger hold the judge rightly failed.)
 
 ## 5.2 `install_light_bulb`
 

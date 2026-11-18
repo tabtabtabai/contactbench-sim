@@ -138,6 +138,9 @@ class DoorAdapter(Adapter):
         self._reext = self._closed = False
         self.door_deg = self.knob_deg = self.latch_mm = 0.0
         self.pads = (0.0, 0.0)
+        self.t_below1 = 0.0          # the last frame the door was shut (< 1 deg): the final opening starts there
+        self._pad_hist = []          # the last GRIP_FRAMES frames of (left, right) pad force
+        self.grip_run_start = None   # since when both pads pass the row's grip gate (pads_check's 3-frame rule)
 
     def scenery(self, t):
         if not self.ep.expert_driven:
@@ -154,6 +157,16 @@ class DoorAdapter(Adapter):
         pr = self.rig.probes["fr3/fr3_rightfinger"].history[-1]["force"]
         self.pads = (pl, pr)
         self.max_latch = max(self.max_latch, self.latch_mm)
+        if self.door_deg < 1.0:
+            self.t_below1 = t
+        # pads_check's gate, online: each pad's rolling 3-frame max above GRIP_N, as a continuous run
+        self._pad_hist = (self._pad_hist + [(pl, pr)])[-GRIP_FRAMES:]
+        if len(self._pad_hist) == GRIP_FRAMES and min(max(h[0] for h in self._pad_hist),
+                                                     max(h[1] for h in self._pad_hist)) > GRIP_N:
+            if self.grip_run_start is None:
+                self.grip_run_start = t - (GRIP_FRAMES - 1) / self.ep.fps
+        else:
+            self.grip_run_start = None
         self._force(t, max(pl, pr))
         self._grip_update(t, min(pl, pr) > GRIP_N)
         if self.t_clear is None and self.latch_mm > self.jamb_mm:
@@ -168,7 +181,7 @@ class DoorAdapter(Adapter):
             self._redo(t, "progress")
         self.max_knob = max(self.max_knob, self.knob_deg)
         self.max_door = max(self.max_door, self.door_deg)
-        # D1 setbacks: the latch re-extends (the knob let go or turned back before the door opened), or the door
+        # setbacks (the contract's retry rule): the latch re-extends (the knob let go or turned back before the door opened), or the door
         # closes back below 5 deg after it had been opened
         if self.t_clear is not None and self.latch_mm < self.jamb_mm and self.max_door < 5.0 and not self._reext:
             self._reext = True
@@ -183,8 +196,18 @@ class DoorAdapter(Adapter):
             self._closed = False
         self.success_online = self._held_open(self.HOLD_S)
 
+    def _anchor(self, t_clear) -> float:
+        """Where the grip window starts: the latch clearing, or the start of the final opening (the last frame the
+        door was shut) if that is later.  A retried opening is not failed for an earlier loss of grip (that costs
+        attempts); the opening that counts is held through the knob."""
+        return max(t_clear, self.t_below1)
+
     def _held_open(self, window) -> bool:
-        if self.t_clear is None or not self.grip.v or self.ep.t < window:
+        """The online success signal = the judge would pass now: unlocked, both pads gripping without a break since
+        the final opening began, and the door >= 5 deg, still, with the TCP still, for the last 1 s."""
+        if self.t_clear is None or self.grip_run_start is None or self.ep.t < window:
+            return False
+        if self.grip_run_start > self._anchor(self.t_clear) + 1.5 / self.ep.fps:
             return False
         t = np.array([r[0] for r in self.log[-int(window * self.ep.fps) - 1:]])
         th = np.degrees(-np.array([r[1] for r in self.log[-len(t):]]))
@@ -225,10 +248,15 @@ class DoorAdapter(Adapter):
             "final_door_deg": round(float(open_deg[-1]), 2), "peak_door_deg": round(float(open_deg.max()), 2),
             "threshold_deg": 5.0, "upstream": "identical"}
         if eng.any():
-            crit["finger_grip_sustained"] = {**pads_check(self.rig, t_unl, t_end),
+            shut = np.flatnonzero(open_deg < 1.0)
+            t_shut = float(t_a[shut[-1]]) if len(shut) else 0.0
+            t0 = max(t_unl, t_shut)
+            crit["finger_grip_sustained"] = {**pads_check(self.rig, t0, t_end),
                                              "upstream": "window from the expert's squeeze + 0.2 s (T[2]+0.2) to "
-                                                         "T[-1]; here from latch clear to the episode end: the "
-                                                         "door is lifted through the knob"}
+                                                         "T[-1]; here from the latch clearing, or the start of the "
+                                                         "final opening (the last frame the door was shut) if later, "
+                                                         "to the episode end: the opening that counts is lifted "
+                                                         "through the knob, and a retried opening costs attempts"}
         else:
             crit["finger_grip_sustained"] = {"pass": False, "note": "the latch never cleared"}
         tcp = np.array(self.tcp_log)
