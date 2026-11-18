@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 
 import numpy as np
 import warp as wp
@@ -232,7 +233,7 @@ def main(argv=None):
     kt.preroll(rig, S, F, tcp0, "bulb")
     ex = G1ScrewExpert(rig, S, "hand", tcp0, kt.YAW_HI, F)
     try:
-        rig.run(150.0, ex.control, ex.extra)
+        rig.run(min(150.0, float(os.environ.get("G1_MAX_T", 150.0))), ex.control, ex.extra)   # G1_MAX_T: pre-flight
     except kt.StopRun:
         print(f"[{NAME}] rollout stopped at t={len(rig.rec.times) / rig.fps:.2f}s")
     paths = rig.rec.save("rollout", force_keys=["thread_N", "seat_N", "pad_torque_mNm", "robot_object_contact_N",

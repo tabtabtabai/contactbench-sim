@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 
 import numpy as np
 import trimesh
@@ -206,7 +207,7 @@ def main(argv=None):
                         relax_close_max=NA.RELAX_CLOSE_MAX, relax_rate=NA.RELAX_RATE, omega=NA.OMEGA,
                         yaw0=NA.YAW0)
     drv.ctl["fingers"] = SN.FING_TOUCH
-    duration = t_plan + SN.T_RETREAT + SN.T_STILL
+    duration = min(t_plan + SN.T_RETREAT + SN.T_STILL, float(os.environ.get("G1_MAX_T", 1e9)))   # G1_MAX_T: pre-flight
     end = {"p": None}
 
     def control(t):
