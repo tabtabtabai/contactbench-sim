@@ -233,6 +233,9 @@ def configure_sensor(cam, model) -> None:
             datas.append(d)
         ids[i] = by_mat[mat]
     if datas:
+        # the device array only holds the textures' handles: keep the Python objects (and so the GPU textures) alive
+        # for the context's lifetime, as upstream does with its own list
+        ctx._render_v2_textures = datas
         ctx.texture_data = wp.array(datas, dtype=TextureData, device=dev)
         ctx.shape_texture_ids = wp.array(ids.astype(np.int32), dtype=wp.int32, device=dev)
     apply_colors(model)
