@@ -90,7 +90,7 @@ MATERIALS = [
 # material -> (base color, texture kind, cycles per metre)
 SPEC = {
     "floor_tile": ((0.56, 0.54, 0.50), "tile", 1.6),
-    "walnut": ((0.40, 0.27, 0.17), "wood_fine", 2.5),
+    "walnut": ((0.52, 0.36, 0.23), "wood_fine", 2.5),
     "plaster": ((0.80, 0.78, 0.74), "plaster", 0.8),
     "oak": ((0.70, 0.52, 0.33), "wood", 3.0),
     "brass": ((0.80, 0.63, 0.32), "brushed", 18.0),
