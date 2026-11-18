@@ -46,6 +46,7 @@ YAW_MARGIN = math.radians(25.0)     # inside the measured window at both ends (a
 YAW_SPAN_MAX = math.radians(300.0)
 IK_TOL = (0.001, math.radians(1.0))
 WRIST_MAX = 0.9                     # rad/s: our G1 scripted policies' wrist rule (<= 1 rad/s), 10 % inside it
+LAST_MISS: dict = {}                # a reach miss's numbers, for the episode record
 FF_MARGIN = 0.5                     # N.m of feed-forward budget above the largest measured over the window
 DEX1_Q = (-0.02, 0.0245)            # the finger joints' range
 
@@ -99,7 +100,12 @@ def wrist_window(ik: G1IK, axis_xy, z_start, z_seat):
         if best is None or span > best[0]:
             best = (span, start, q_start, gmax)
     if best is None or best[0] <= 2 * YAW_MARGIN:
-        raise SystemExit(f"{NAME}: no top-down wrist window reaches the socket at {tuple(axis_xy)}")
+        LAST_MISS.update(socket_xy_m=[round(float(v), 4) for v in axis_xy],
+                         best_span_deg=round(math.degrees(best[0]), 1) if best else 0.0,
+                         needed_deg=round(math.degrees(2 * YAW_MARGIN), 1))
+        raise SystemExit(f"{NAME}: no top-down wrist window reaches the socket at "
+                         f"({axis_xy[0]:.4f}, {axis_xy[1]:.4f}) m: best span "
+                         f"{LAST_MISS['best_span_deg']} deg, the margins alone take {LAST_MISS['needed_deg']}")
     span, start, q_start, gmax = best
     return start - YAW_MARGIN, start - span + YAW_MARGIN, q_start, gmax
 
