@@ -513,7 +513,139 @@ class BulbAdapter(Adapter):
         return None
 
 
-ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "install_light_bulb": BulbAdapter}
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 5.6  turn_dial_to_target (continuous "standard" dial; push and snap later, as variants)
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+class DialAdapter(Adapter):
+    """The row's Expert object is used only as the world-state logger (its ``extra``: knob angle, press, pads, robot
+    contact, fingertip midpoint); its phases and timestamps are never read by the judge."""
+    name = "dial"
+    TURN_RATE = np.radians(2.0)     # turning = the knob moves faster than this, with the hand on it
+    CLEAR_S = 0.4
+
+    def __init__(self, ep):
+        super().__init__(ep)
+        import force_bench.appendix_tasks.turn_dial_to_target as dt
+        from force_bench.appendix_tasks.common import CONTACT_FREE_N
+        self.dt = dt
+        self.ex = ep.extra_cb.__self__
+        self.target = float(self.ex.target)                 # rad, relative to the dial's 0 mark
+        self.dial = self.ex.dial
+        self.tol = np.radians(dt.SNAP_TOL_DEG if self.dial == "snap" else dt.HALF_TICK_DEG)
+        self.free_n = CONTACT_FREE_N
+        self.best_err = None
+        self.contact_run = _Run(GRIP_FRAMES)
+        self.release_tips = None
+        self.clear_since = None
+        self.t_judge = None
+
+    def monitor(self, t):
+        super().monitor(t)
+        if self.ep.done or not self.ex.log or self.t_judge is not None:
+            return
+        r = self.ex.log[-1]
+        self._force(t, r["robot"])
+        ch = self._grip_update(t, min(r["fL"], r["fR"]) > GRIP_N)
+        err = abs(r["ang"] - self.target)
+        if self.best_err is None or err < self.best_err - np.radians(10.0):
+            if self.best_err is not None:
+                self._redo(t, "progress")
+            self.best_err = err if self.best_err is None else min(self.best_err, err)
+        self.best_err = min(self.best_err, err)
+        if err > self.best_err + np.radians(BACKOUT_DEG):
+            self._set_back(t, "dial_turned_away", error_deg=round(float(np.degrees(err)), 1),
+                           best_error_deg=round(float(np.degrees(self.best_err)), 1))
+            self.best_err = err
+        # the hand has let go for good: no contact for CLEAR_S and MOVE_MIN away from where the contact ended
+        tips = np.asarray(r["tips"], float)
+        touching = r["robot"] >= self.free_n
+        if touching:
+            self.release_tips, self.clear_since = tips, None
+        elif not self.ep.expert_driven:
+            away = self.release_tips is None or np.linalg.norm(tips - self.release_tips) >= self.dt.MOVE_MIN
+            if away:
+                self.clear_since = t if self.clear_since is None else self.clear_since
+            else:
+                self.clear_since = None
+        self.success_online = err <= self.tol and self.clear_since is not None
+
+    def check_end(self):
+        if self.clear_since is not None and self.ep.t - self.clear_since >= self.CLEAR_S:
+            self.ep.end("released")
+
+    def judge_phase(self):
+        """The row's own ending after the hand has gone: still for T_STILL, arm holding its last targets."""
+        ep = self.ep
+        if ep.expert_driven or ep.ev.irreversible:
+            return
+        ep.done = False
+        self.t_judge = ep.t
+        for _ in range(int(round(self.dt.T_STILL * ep.fps))):
+            ep.step(None)
+        ep.done = True
+
+    def upstream_ok(self) -> bool:
+        return self.ep.expert_driven        # the row's verdict reads the expert's phases (turn/trim, open, still)
+
+    def progress(self):
+        if self.best_err is None:
+            return 0.0
+        return round(max(0.0, 1.0 - self.best_err / max(1e-6, abs(self.target))), 3)
+
+    def final_error_deg(self):
+        return float(np.degrees(self.ex.log[-1]["ang"] - self.target)) if self.ex.log else None
+
+    def status_line(self):
+        r = self.ex.log[-1] if self.ex.log else None
+        if r is None:
+            return ""
+        return (f"dial={np.degrees(r['ang']):+6.1f}deg target={np.degrees(self.target):+.0f} "
+                f"pads={r['fL']:.1f}/{r['fR']:.1f}N robot={r['robot']:.2f}N")
+
+    def judge(self) -> dict:
+        dt = self.dt
+        L = self.ex.log
+        t = np.array([r["t"] for r in L])
+        ang = np.array([r["ang"] for r in L])
+        robot = np.array([r["robot"] for r in L])
+        pads = np.array([r["fL"] + r["fR"] for r in L])
+        tips = np.array([r["tips"] for r in L])
+        crit = {}
+        # the still window: the judge phase (policy), or the expert's own still phase (its last T_STILL s)
+        t_still = self.t_judge if self.t_judge is not None else float(t[-1]) - dt.T_STILL
+        still = t >= t_still - 1e-9
+        err = float(np.degrees(ang[-1] - self.target))
+        crit["dial_at_target"] = {"pass": bool(abs(err) <= np.degrees(self.tol)),
+                                  "target_deg": round(float(np.degrees(self.target)), 2),
+                                  "final_deg": round(float(np.degrees(ang[-1])), 2), "error_deg": round(err, 2),
+                                  "tolerance_deg": round(float(np.degrees(self.tol)), 2), "upstream": "identical"}
+        if self.dial == "snap":
+            crit["dial_at_target"]["note"] = "snap dial: detent seating (pad deflection) is not judged here yet"
+        drift = float(np.degrees(np.ptp(ang[still]))) if still.any() else float("nan")
+        crit["dial_stays_after_release"] = {"pass": bool(np.isfinite(drift) and drift < dt.DRIFT_MAX_DEG),
+                                            "drift_still_deg": round(drift, 3), "upstream": "identical threshold; "
+                                            "window = the still phase after the hand has gone"}
+        rate = np.abs(np.gradient(ang, t)) if len(t) > 2 else np.zeros_like(t)
+        turning = (rate > self.TURN_RATE) & (robot >= self.free_n) & ~still
+        crit["finger_grasp_real"] = {"pass": bool(turning.any() and pads[turning].mean() > 2.0),
+                                     "mean_pad_force_N": round(float(pads[turning].mean()), 2) if turning.any() else 0.0,
+                                     "upstream": "upstream averages over the expert's turn/trim phases; here over "
+                                                 "every frame the hand is on the knob while it turns > 2 deg/s"}
+        touch = np.flatnonzero(robot >= self.free_n)
+        i_rel = int(touch[-1]) if len(touch) else 0
+        moved = float(np.linalg.norm(tips[-1] - tips[i_rel]))
+        peak = float(robot[still].max()) if still.any() else float("inf")
+        crit["released_and_clear"] = {"pass": bool(still.any() and peak < self.free_n and moved >= dt.MOVE_MIN),
+                                      "robot_object_contact_peak_N": round(peak, 4), "hand_moved_mm": round(moved * 1e3, 1),
+                                      "min_move_mm": dt.MOVE_MIN * 1e3, "upstream": "identical thresholds; the move is "
+                                      "measured from the last contact (upstream: from the expert's open phase)"}
+        finite = bool(np.isfinite(ang).all())
+        return {"pass": bool(all(v["pass"] for v in crit.values()) and finite), "criteria": crit, "finite": finite,
+                "t_end_s": round(float(t[-1]), 3), "final_error_deg": round(err, 2)}
+
+
+ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "turn_door_handle_open_door_flat": DoorAdapter,
+            "install_light_bulb": BulbAdapter, "turn_dial_to_target": DialAdapter}
 
 
 def adapter_for(module: str):
