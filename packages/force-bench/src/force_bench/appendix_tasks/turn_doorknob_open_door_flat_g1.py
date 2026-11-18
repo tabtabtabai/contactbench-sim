@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 
@@ -38,8 +39,8 @@ from force_bench.appendix_tasks._door_kit import (LOCK_PROBE_NM, LOCK_PROBE_S, H
                                                   door_pose, drawn_shapes, joint_reader, lock_probe_check,
                                                   pads_check)
 from force_bench.appendix_tasks.common import StopRun, appendix_rig
-from force_bench.g1.robot import (SumProbe, add_g1, apply_look, camera_mounts, floor_and_table, init_pose,
-                                  q_indices)
+from force_bench.g1.robot import (ContactPeak, SumProbe, add_g1, apply_look, camera_mounts, floor_and_table,
+                                  init_pose, q_indices)
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver
 
@@ -49,6 +50,9 @@ IMPRATIO = 10.0
 PRE_HOLD = 0.6                                  # s at the pre-grasp before descending (covers the lock probe)
 I_UP = 8                                        # the plan's first segment (straight up from the reset pose): 8 steps
 # the closed-loop turn and lift (privileged, on MEASURED knob, latch and door state, as the FR3 expert):
+RAMP_S = 0.5                                    # the turn and lift rates ramp in over this, and out over
+#                                                 their last RAMP_S of travel (no velocity step at either end)
+BACK_RATE = 0.8                                 # rad/s peak, the open hand's turn back (minimum jerk)
 TURN_RATE, TURN_LEAD = 30.0, 15.0               # deg/s of commanded knob turn; at most this far ahead of the knob
 CLEAR_MARGIN_MM = 0.1                           # turn until the measured latch is this far past the jamb face
 PAUSE_S = 0.4
@@ -56,6 +60,13 @@ LIFT_RATE, LIFT_LEAD = 12.0, 3.0                # deg/s of commanded door angle;
 OPEN_TO_DEG, HOLD_S = 45.0, 1.6
 TIMEOUT_S = float(os.environ.get("G1_MAX_T", 40.0))   # G1_MAX_T: a short pre-flight run
 CAM_POS, CAM_TARGET = np.array([0.55, -0.55, 0.55]), np.array([-0.08, 0.20, 0.05])
+
+
+def ramped(rate, elapsed, remaining):
+    """A rate (per s) ramped smoothly in from a phase's start and out toward its end point."""
+    s = min(1.0, max(0.0, elapsed) / RAMP_S)
+    s = s * s * (3.0 - 2.0 * s)
+    return rate * max(0.1, s) * min(1.0, max(0.15, remaining / (rate * RAMP_S)))
 
 
 def parse(argv=None):
@@ -105,6 +116,7 @@ def main(argv=None):
     for i in (1, 2):                             # each pad = its finger's two links
         rig.probes[f"g1/pad{i}"] = SumProbe([rig.probes.pop(lb) for lb in links[i]])
     rig.pad_probes = ("g1/pad1", "g1/pad2")
+    rig.contact_peak = rig.probes["g1/contact"] = ContactPeak(rig.model)   # names the pair behind any force peak
     rig.camera_mounts = camera_mounts(a.model, side)
     apply_look(rig.model, g1)                    # the G1's own colours, after the recorder's palette (finalize)
     rig.solver = make_solver(rig.model, iterations=24, **{**rig.solver_options, "impratio": IMPRATIO})
@@ -183,7 +195,8 @@ def main(argv=None):
                 go("turn", t)
         elif ph in ("turn", "pause"):
             if latch < clear_m:                   # still in the strike: advance, bounded ahead of the knob
-                st["psi"] = min(st["psi"] + TURN_RATE * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
+                rate = ramped(TURN_RATE, t - st["t_phase"], T_turn["deg"][-1] - st["psi"])
+                st["psi"] = min(st["psi"] + rate * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
                 if partial and st["psi"] >= T_turn["deg"][-1] - 1e-6 and ph == "turn":
                     go("pause", t)                # one grasp reaches no further (a partial plan): stop turning
             elif ph == "turn":
@@ -197,8 +210,10 @@ def main(argv=None):
             if t - st["t_phase"] >= 0.5:
                 st["psi_open"] = st["psi"]
                 go("back", t)
-        elif ph == "back":                        # turn the open hand back to the grasp angle
-            u = min(1.0, (t - st["t_phase"]) / 1.0)
+        elif ph == "back":                        # turn the open hand back to the grasp angle (minimum jerk)
+            T_back = max(1.0, 1.875 * math.radians(st["psi_open"]) / BACK_RATE)
+            u = min(1.0, (t - st["t_phase"]) / T_back)
+            u = u * u * u * (10 - 15 * u + 6 * u * u)
             q, g = table(T_turn, st["psi_open"] * (1.0 - u))
             close = False
             if u >= 1.0:
@@ -215,9 +230,11 @@ def main(argv=None):
                 raise StopRun
         elif ph in ("lift", "hold"):
             if latch < clear_m and door_deg < 5.0:   # the latch slipped back before the door opened: turn again
-                st["psi"] = min(st["psi"] + TURN_RATE * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
+                rate = ramped(TURN_RATE, t - st["t_phase"], T_turn["deg"][-1] - st["psi"])
+                st["psi"] = min(st["psi"] + rate * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
             open_to = min(OPEN_TO_DEG, float(T_lift["deg"][-1]))   # as far as the arm reaches (>= 10 deg)
-            st["phi"] = min(st["phi"] + LIFT_RATE * dt, door_deg + LIFT_LEAD, open_to)
+            rate = ramped(LIFT_RATE, t - st["t_phase"] if ph == "lift" else RAMP_S, open_to - st["phi"])
+            st["phi"] = min(st["phi"] + rate * dt, door_deg + LIFT_LEAD, open_to)
             q, g = table(T_lift, st["phi"])
             if ph == "lift" and st["phi"] >= open_to and door_deg >= open_to - 1.0:
                 go("hold", t)

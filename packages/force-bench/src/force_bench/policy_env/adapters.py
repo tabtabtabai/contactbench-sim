@@ -95,7 +95,9 @@ class Adapter:
     def _force(self, t, f):
         self.over = self.over + 1 if f > FORCE_LIMIT_N else 0
         if self.over == FORCE_LIMIT_FRAMES:
-            self.ep.ev.fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=FORCE_LIMIT_N)
+            cp = getattr(self.rig, "contact_peak", None)     # which contact is behind it, when the rig logs pairs
+            self.ep.ev.fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=FORCE_LIMIT_N,
+                             **({"contacts": cp.top, "peak_contact": cp.peak} if cp is not None else {}))
             self.ep.end("irreversible")
 
     def check_end(self):

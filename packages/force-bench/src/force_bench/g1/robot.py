@@ -19,10 +19,10 @@ import newton
 PREFIX = "g1/"
 import os
 FINGER_EFFORT = float(os.environ.get("G1_FINGER_EFFORT", 40.0))   # N per finger: the squeeze (Dex1 spec 5-120 N)
-ARM_KP_SCALE = 10.0           # the arm servo, stiffer than matrix's MuJoCo actuators (kp 300/80): the open-loop
-# scripted expert needs the hand within ~2 mm of its IK pose under gravity and contact (at 1x it sagged 15 mm and
-# drifted 28 mm off the knob's axis while turning).  The joint effort caps stay the G1's (25 / 5 N.m); the real G1
-# gets its tracking from the whole-body controller's gravity compensation instead.
+ARM_KP_SCALE = float(os.environ.get("G1_ARM_KP_SCALE", 1.0))   # the arm servo against matrix's MuJoCo actuators'
+# kp (300 shoulder/elbow, 80 wrist).  1x by default, with the gravity torques fed forward; at most 3x (a stiffer arm
+# turns any graze into an impact).  The joint effort caps stay the G1's (25 / 5 N.m).
+ARM_KP_MAX = 3.0
 COLLIDE_BODIES = ("hand_Link1_2", "hand_Link1_3", "hand_Link2_2", "hand_Link2_3")
 
 
@@ -154,6 +154,82 @@ class SumProbe:
         return rec
 
 
+def _qrot(q_xyzw, v):
+    q, w = q_xyzw[..., :3], q_xyzw[..., 3:4]
+    t = 2.0 * np.cross(q, v)
+    return v + w * t + np.cross(q, t)
+
+
+class ContactPeak:
+    """Which contact is behind a force: every frame, the robot's contacts (either shape on a ``prefix`` body) summed
+    per shape pair; keeps the strongest pair each frame (``top``), the episode's peak pair and the frames whose
+    strongest pair is above LOG_N.  Registered as a rig probe, so it is sampled with the pads every frame (its
+    ``force`` is that frame's strongest robot pair)."""
+
+    LOG_N = 50.0
+    MAX_LOG = 300
+
+    def __init__(self, model, prefix: str = PREFIX):
+        self.shape_labels = [str(x or "") for x in model.shape_label]
+        self.body_labels = [str(x or "") for x in model.body_label]
+        self.shape_body = model.shape_body.numpy()
+        self.robot = np.array([self._body(i).startswith(prefix) for i in range(len(self.shape_labels))], bool)
+        self.history, self.log, self.top, self.peak, self.n_over = [], [], [], None, 0
+
+    def _body(self, shape):
+        b = int(self.shape_body[shape])
+        return self.body_labels[b] if b >= 0 else "world"
+
+    def sample(self, contacts, state, t):
+        rec = {"t": t, "force": 0.0, "friction": 0.0}
+        self.top = []
+        f = getattr(contacts, "force", None)
+        n = int(contacts.rigid_contact_count.numpy()[0]) if f is not None else 0
+        if n > 0:
+            n = min(n, len(contacts.rigid_contact_shape0))
+            s0 = contacts.rigid_contact_shape0.numpy()[:n].astype(int)
+            s1 = contacts.rigid_contact_shape1.numpy()[:n].astype(int)
+            ok = (s0 >= 0) & (s1 >= 0)
+            rob = ok & (self.robot[np.clip(s0, 0, None)] | self.robot[np.clip(s1, 0, None)])
+            if rob.any():
+                idx = np.flatnonzero(rob)
+                F = np.linalg.norm(f.numpy()[:n][idx][:, :3].astype(float), axis=1)
+                pairs = {}
+                for i, fi in zip(idx, F):
+                    a, b = int(s0[i]), int(s1[i])
+                    if not self.robot[a]:
+                        a, b = b, a                       # the robot's shape first
+                    tot, best_i, best_f = pairs.get((a, b), (0.0, i, -1.0))
+                    pairs[(a, b)] = (tot + fi, i if fi > best_f else best_i, max(best_f, fi))
+                ranked = sorted(pairs.items(), key=lambda kv: -kv[1][0])[:3]
+                if ranked and ranked[0][1][0] > 1e-6:
+                    bq = state.body_q.numpy()
+                    p0 = contacts.rigid_contact_point0.numpy()
+                    for (a, b), (tot, i, _) in ranked:
+                        sh = int(s0[i])
+                        bi = int(self.shape_body[sh])
+                        pt = p0[i].astype(float)
+                        if bi >= 0:
+                            pt = bq[bi, :3] + _qrot(bq[bi, 3:7], pt)
+                        self.top.append({"force_N": round(float(tot), 1), "shape_a": self.shape_labels[a],
+                                         "shape_b": self.shape_labels[b], "body_a": self._body(a),
+                                         "body_b": self._body(b), "point": [round(float(v), 4) for v in pt]})
+                    rec["force"] = float(ranked[0][1][0])
+        if self.top:
+            if self.peak is None or self.top[0]["force_N"] > self.peak["force_N"]:
+                self.peak = {"t": round(float(t), 3), **self.top[0]}
+            if self.top[0]["force_N"] > self.LOG_N:
+                self.n_over += 1
+                if len(self.log) < self.MAX_LOG:
+                    self.log.append({"t": round(float(t), 3), "pairs": self.top})
+        self.history.append(rec)
+        return rec
+
+    def summary(self) -> dict:
+        return {"peak": self.peak, "log_above_N": self.LOG_N, "frames_above": self.n_over,
+                "frames_above_logged": self.log}
+
+
 def camera_mounts(npz_path, side: str) -> list:
     """The G1's own cameras from the exported model, as PolicyCameras mounts [(name, body label, T_body_cam, fovy)]:
     the head camera (the d435 mount, Isaac's g1_front_camera; the left of the challenge's head pair) and the active
@@ -183,6 +259,8 @@ def variant_params() -> dict:
     the episode record (``robot_variant_params``).  Published episodes must stay inside the real Dex1's ratings."""
     if not DEX1_RATED_GRIP_N[0] <= FINGER_EFFORT <= DEX1_RATED_GRIP_N[1]:
         raise ValueError(f"squeeze {FINGER_EFFORT} N is outside the Dex1's rated {DEX1_RATED_GRIP_N} N")
+    if not 1.0 <= ARM_KP_SCALE <= ARM_KP_MAX:
+        raise ValueError(f"arm kp scale {ARM_KP_SCALE} is outside 1-{ARM_KP_MAX:g}x matrix's")
     return {
         "finger_effort_N": FINGER_EFFORT,
         "finger_effort_source": "the Dex1's rated grip, 5-120 N per finger (matrix sims/mujoco scene, Dex1 spec)",
@@ -191,8 +269,9 @@ def variant_params() -> dict:
                           "parameters, not an identified PhysX material equivalence'); not measured on the real pads"
                           if PAD_MU == 1.0 else "NON-DEFAULT: a diagnostic value, not for published episodes"),
         "arm_kp_scale": ARM_KP_SCALE,
-        "arm_kp_source": "10x matrix's MuJoCo arm actuator kp (300 shoulder/elbow, 80 wrist); effort caps unchanged "
-                         "(25 / 5 N.m); stands in for the whole-body controller's tracking",
+        "arm_kp_source": (f"{ARM_KP_SCALE:g}x matrix's MuJoCo arm actuator kp (300 shoulder/elbow, 80 wrist); effort "
+                          "caps unchanged (25 / 5 N.m); with the gravity feed-forward it stands in for the "
+                          "whole-body controller's tracking"),
         "gravity_feedforward": True,
         "gravity_source": "the arm's gravity torques from the same MuJoCo model, fed forward (the whole-body "
                           "controller's gravity compensation)",

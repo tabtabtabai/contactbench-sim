@@ -30,8 +30,8 @@ import warp as wp
 from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, appendix_rig, sample_start
 from force_bench.appendix_tasks.turn_dial_to_target import (DIAL_KEYS, DIAL_PLACE, IMPRATIO, ITERS, KNOB_LABELS,
                                                             SUBSTEPS, T_STILL)
-from force_bench.g1.robot import (SumProbe, add_g1, apply_look, camera_mounts, floor_and_table, init_pose,
-                                  q_indices)
+from force_bench.g1.robot import (ContactPeak, SumProbe, add_g1, apply_look, camera_mounts, floor_and_table,
+                                  init_pose, q_indices)
 from force_bench.kit import add_asset, place_on_table
 from force_bench.kit.mechanisms import dial as D
 from force_bench.rig import make_solver
@@ -83,12 +83,13 @@ def _stroke_controller(traj, lg, rig, arm_names, fingers, tq_index, f_index, go,
     rise; then the retreat (straight up, back over the reset pose's hand, down into it) and stand still."""
     S = []
     for k, sk in enumerate(traj["strokes"]):
-        way = sk["waypoints"][(I_UP if k == 0 else 0):sk["i_close"] + 1]
+        i0 = sk.get("i_up", I_UP) if k == 0 else 0      # the plan's straight-up segment's end
+        way = sk["waypoints"][i0:sk["i_close"] + 1]
         t0 = way[0][0]
         pre = PRE_HOLD if k == 0 else 0.0
         wt = np.array([0.0] + [w[0] - t0 + pre for w in way])
         wq = np.array([way[0][1]] + [w[1] for w in way])
-        tg = sk["tau_g"][(I_UP if k == 0 else 0):sk["i_close"] + 1]
+        tg = sk["tau_g"][i0:sk["i_close"] + 1]
         wg = np.array([tg[0]] + tg)
         up = sk["up"]
         S.append({"wt": wt, "wq": wq, "wg": wg, "modes": ["open"] + [w[2] for w in way],
@@ -209,6 +210,7 @@ def main(argv=None):
               "robot_object": RobotContactProbe(rig.model, moving, static_shapes=static_labels)}
     rig.probes.update(probes)
     rig.pad_probes = ("finL", "finR")
+    rig.contact_peak = rig.probes["g1/contact"] = ContactPeak(rig.model)   # names the pair behind any force peak
     rig.camera_mounts = camera_mounts(a.model, side)
     apply_look(rig.model, g1)                    # the G1's own colours, after the recorder's palette (finalize)
     tips = [g1["bodies"][f"{side}_hand_Link{i}_3"] for i in (1, 2)]
@@ -239,7 +241,8 @@ def main(argv=None):
     for n, v in init_pose(a.model).items():       # both arms in the reset pose; the idle one holds it throughout
         if n in g1["joints"]:
             q0[qi[n]], qt0[int(tqs[g1["joints"][n]])] = v, v
-    q_start = traj["strokes"][0]["waypoints"][I_UP][1] if "strokes" in traj else Q[0]   # strokes: start raised
+    sk0 = traj["strokes"][0] if "strokes" in traj else None
+    q_start = sk0["waypoints"][sk0.get("i_up", I_UP)][1] if sk0 else Q[0]   # strokes: start raised
     for n, v in zip(arm_names, q_start):
         q0[qi[n]], qt0[tq_index[n]] = v, v
     for n in fingers:
