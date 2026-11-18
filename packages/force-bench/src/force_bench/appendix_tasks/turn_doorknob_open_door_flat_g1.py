@@ -101,6 +101,10 @@ def main(argv=None):
     ts = np.array([w[0] for w in way])
     Q = np.array([w[1] for w in way])
     modes = [w[2] for w in way]
+    # the whole-body controller's gravity compensation: the arm's gravity torques at each waypoint, fed forward
+    G = np.array([traj["tau_g"][1]] + traj["tau_g"][1:]) if "tau_g" in traj else np.zeros_like(Q)
+    qds = rig.model.joint_qd_start.numpy()
+    f_index = [int(qds[g1["joints"][n]]) for n in arm_names]
     q0 = rig.s0.joint_q.numpy()
     qt0 = rig.control.joint_target_q.numpy()
     for n, v in zip(arm_names, Q[0]):
@@ -121,6 +125,9 @@ def main(argv=None):
         q = Q[k] + s * (Q[k + 1] - Q[k])
         for n, v in zip(arm_names, q):
             qt[tq_index[n]] = v
+        jf = rig.control.joint_f.numpy()
+        jf[f_index] = G[k] + s * (G[k + 1] - G[k])
+        rig.control.joint_f.assign(jf)
         f = FINGER_CLOSE if modes[k + 1] == "close" else FINGER_OPEN
         for n in fingers:
             qt[tq_index[n]] = f
