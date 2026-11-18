@@ -217,11 +217,16 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
             obj.run = patched
     sys_argv = sys.argv
     sys.argv = [spec.dotted, *argv]
-    upstream = None
+    upstream, upstream_error = None, None
     try:
         mod.main()
     except _EndEpisode:
         pass
+    except Exception as exc:                 # the row's own verdict on a rollout it was not laid out for
+        if "judge" not in box:
+            raise
+        upstream_error = f"{type(exc).__name__}: {exc}"
+        print(f"[policy_env] upstream verdict failed on this rollout: {upstream_error}", flush=True)
     finally:
         sys.argv = sys_argv
         for cls, fn in originals:
@@ -229,7 +234,7 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
         driver.close()
     ep = box["ep"]
     qa_path = next(out_dir.rglob("appendix_qa.json"), None)
-    if qa_path is not None and with_upstream and ep.adapter.upstream_ok():
+    if qa_path is not None and with_upstream and ep.adapter.upstream_ok() and upstream_error is None:
         upstream = json.loads(qa_path.read_text())
-    return {"episode": ep, "judge": box["judge"], "upstream": upstream, "t_host_s": time.time() - t_host0,
-            "row_argv": argv}
+    return {"episode": ep, "judge": box["judge"], "upstream": upstream, "upstream_error": upstream_error,
+            "t_host_s": time.time() - t_host0, "row_argv": argv}

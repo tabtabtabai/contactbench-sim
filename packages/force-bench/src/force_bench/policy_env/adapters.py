@@ -134,6 +134,7 @@ class DoorAdapter(Adapter):
         self.t_clear = None
         self.max_knob = 0.0
         self.max_door = 0.0
+        self.max_latch = 0.0
         self.door_deg = self.knob_deg = self.latch_mm = 0.0
         self.pads = (0.0, 0.0)
 
@@ -151,6 +152,7 @@ class DoorAdapter(Adapter):
         pl = self.rig.probes["fr3/fr3_leftfinger"].history[-1]["force"]
         pr = self.rig.probes["fr3/fr3_rightfinger"].history[-1]["force"]
         self.pads = (pl, pr)
+        self.max_latch = max(self.max_latch, self.latch_mm)
         self._force(t, max(pl, pr))
         self._grip_update(t, min(pl, pr) > GRIP_N)
         if self.t_clear is None and self.latch_mm > self.jamb_mm:
@@ -189,12 +191,8 @@ class DoorAdapter(Adapter):
 
     def progress(self):
         # partial credit for diagnosis only: half for unlocking, half for the door's way to 5 deg
-        unl = min(1.0, self.max_knob / max(1e-6, self._unlock_deg())) if self.t_clear is None else 1.0
+        unl = 1.0 if self.t_clear is not None else min(1.0, max(0.0, self.max_latch) / self.jamb_mm)
         return round(0.5 * unl + 0.5 * min(1.0, max(0.0, self.door_deg) / 5.0), 3)
-
-    def _unlock_deg(self):
-        from force_bench.kit.mechanisms import doorknob_module as dm
-        return float(getattr(dm, "JAMB_CLEAR_DEG", 60.0))
 
     def status_line(self):
         return (f"door={self.door_deg:5.1f}deg knob={self.knob_deg:5.1f}deg latch={self.latch_mm:5.2f}mm "
