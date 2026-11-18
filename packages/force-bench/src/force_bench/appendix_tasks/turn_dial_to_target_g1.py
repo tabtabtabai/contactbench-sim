@@ -29,7 +29,8 @@ import warp as wp
 from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, appendix_rig, sample_start
 from force_bench.appendix_tasks.turn_dial_to_target import (DIAL_KEYS, DIAL_PLACE, IMPRATIO, ITERS, KNOB_LABELS,
                                                             SUBSTEPS, T_STILL)
-from force_bench.g1.robot import SumProbe, add_g1, apply_look, camera_mounts, q_indices
+from force_bench.g1.robot import (SumProbe, add_g1, apply_look, camera_mounts, floor_and_table, init_pose,
+                                  q_indices)
 from force_bench.kit import add_asset, place_on_table
 from force_bench.kit.mechanisms import dial as D
 from force_bench.rig import make_solver
@@ -92,6 +93,8 @@ def main(argv=None):
     rig.robot_base = pelvis
     px = float(traj["pelvis_cb"][0])
     rig.table(center_xy=(px + 0.12 + 0.35, float(start[1])), half=0.35)
+    if "floor_cb" in traj:                       # the G1 on its floor, a solid table under the board (Isaac setup)
+        floor_and_table(rig.builder, float(traj["floor_cb"]), (px + 0.12 + 0.35, float(start[1])), (0.35, 0.35))
     pose = place_on_table(key, choice, xy=(start[0], start[1]), yaw=float(start[2]))
     h = add_asset(rig, key, choice, pose=pose)
     side = traj["arm"]
@@ -110,7 +113,7 @@ def main(argv=None):
     rig.probes.update(probes)
     rig.pad_probes = ("finL", "finR")
     rig.camera_mounts = camera_mounts(a.model, side)
-    apply_look(rig.model)                        # after the recorder's palette (finalize)
+    apply_look(rig.model, g1)                    # the G1's own colours, after the recorder's palette (finalize)
     tips = [g1["bodies"][f"{side}_hand_Link{i}_3"] for i in (1, 2)]
     lg = G1DialLog(rig, h, probes, tips, np.radians(traj["target_deg"]))
     qi = q_indices(rig.model, g1["joints"])
@@ -120,15 +123,22 @@ def main(argv=None):
     fingers = [f"{side}_dex1_finger_joint_1", f"{side}_dex1_finger_joint_2"]
     tq_index = {n: int(tqs[g1["joints"][n]]) for n in [*arm_names, *fingers]}
     f_index = [int(qds[g1["joints"][n]]) for n in arm_names]
-    way = traj["waypoints"]
+    way = traj["waypoints"][:traj.get("i_close", len(traj["waypoints"]) - 1) + 1]
     ts = np.array([w[0] for w in way]) + PRE_HOLD
     ts[0] = 0.0
-    Q, G = np.array([w[1] for w in way]), np.array(traj["tau_g"])
+    Q, G = np.array([w[1] for w in way]), np.array(traj["tau_g"][:len(way)])
+    ret = traj.get("retreat") or []              # straight up, back over the reset pose's hand, down into it
+    RQ = np.array([w[1] for w in ret]) if ret else None
+    RG = np.array(traj.get("retreat_tau_g") or [])
+    RT = np.array([w[0] for w in ret]) if ret else None
     modes = [w[2] for w in way]
     T_turn = {k: np.asarray(v) for k, v in traj["turn_table"].items()}
-    T_ret = {k: np.asarray(v) for k, v in traj["retreat_table"].items()}
+    T_ret = {k: np.asarray(v) for k, v in traj["retreat_table"].items()} if "retreat_table" in traj else None
     q0 = rig.s0.joint_q.numpy()
     qt0 = rig.control.joint_target_q.numpy()
+    for n, v in init_pose(a.model).items():       # both arms in the reset pose; the idle one holds it throughout
+        if n in g1["joints"]:
+            q0[qi[n]], qt0[int(tqs[g1["joints"][n]])] = v, v
     for n, v in zip(arm_names, Q[0]):
         q0[qi[n]], qt0[tq_index[n]] = v, v
     for n in fingers:
@@ -175,6 +185,16 @@ def main(argv=None):
             close = False
             if t - st["t_phase"] >= T_OPEN:
                 go("retreat", t)
+        elif ph in ("retreat", "still") and RT is not None:
+            tau_r = min(t - st["t_phase"], RT[-1]) if ph == "retreat" else RT[-1]
+            k = int(np.clip(np.searchsorted(RT, tau_r, side="right") - 1, 0, len(RT) - 2))
+            s_ = float(np.clip((tau_r - RT[k]) / max(1e-9, RT[k + 1] - RT[k]), 0, 1))
+            q, g = RQ[k] + s_ * (RQ[k + 1] - RQ[k]), RG[k] + s_ * (RG[k + 1] - RG[k])
+            close = False
+            if ph == "retreat" and tau_r >= RT[-1]:
+                go("still", t)
+            if ph == "still" and t - st["t_phase"] >= T_STILL:
+                raise StopRun
         elif ph in ("retreat", "still"):
             u = min(1.0, (t - st["t_phase"]) / T_RETREAT) if ph == "retreat" else 1.0
             q, g = interp(T_ret, "mm", u * T_ret["mm"][-1])

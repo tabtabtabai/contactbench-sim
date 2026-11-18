@@ -197,6 +197,11 @@ def variant_params() -> dict:
         "gravity_source": "the arm's gravity torques from the same MuJoCo model, fed forward (the whole-body "
                           "controller's gravity compensation)",
         "finger_collision": "a box per Dex1 finger link fitted to its collision mesh (MuJoCo collides meshes as hulls)",
+        "setup": "matrix's MuJoCo port of the Isaac G1 + Dex1 tasks: pelvis 0.793 m on straight legs, table top "
+                 "0.8703 m (Isaac 0.8373 + the 3.3 cm pelvis difference), the ColorArrangement reset pose (both arms, "
+                 "waist), the idle arm holding it",
+        "start_pose": "the reset pose with the ACTIVE hand already raised to the hover height (table + 10 cm or more): "
+                      "at the reset pose that hand sits inside the door frame's near edge when the part is ~50 cm out",
     }
 
 

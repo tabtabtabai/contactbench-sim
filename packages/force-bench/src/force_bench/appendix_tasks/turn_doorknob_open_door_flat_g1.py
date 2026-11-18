@@ -46,6 +46,7 @@ NAME = "turn_doorknob_open_door_flat_g1"
 FINGER_OPEN, FINGER_CLOSE = -0.02, 0.0          # Dex1 finger joints: -0.02 = 83 mm open; 0.0 = 43 mm (< the knob)
 IMPRATIO = 10.0
 PRE_HOLD = 0.6                                  # s at the pre-grasp before descending (covers the lock probe)
+I_UP = 8                                        # the plan's first segment (straight up from the reset pose): 8 steps
 # the closed-loop turn and lift (privileged, on MEASURED knob, latch and door state, as the FR3 expert):
 TURN_RATE, TURN_LEAD = 30.0, 15.0               # deg/s of commanded knob turn; at most this far ahead of the knob
 CLEAR_MARGIN_MM = 0.1                           # turn until the measured latch is this far past the jamb face
@@ -115,7 +116,10 @@ def main(argv=None):
     tips = [g1["bodies"][f"{side}_hand_Link{i}_3"] for i in (1, 2)]
     # the approach on the clock: from the reset pose (held while the lock probe runs) up, across and down to the
     # squeeze.  Older trajectories started at the arm's home pose, inside the door: those start at the pre-grasp.
-    first = 0 if "floor_cb" in traj else 1
+    # Isaac setup: start with the active hand already raised to the hover height (the end of the plan's straight-up
+    # segment, I_UP).  At the reset pose that hand sits inside the door frame's near edge when the knob is ~50 cm
+    # out: starting there drove the pads to 1.4 kN in 2.6 s.  Recorded as start_raised.
+    first = traj.get("i_up", I_UP) if "floor_cb" in traj else 1
     way = traj["waypoints"][first:traj["i_close"] + 1]
     t0 = way[0][0]
     way = [(0.0, way[0][1], way[0][2])] + [(w[0] - t0 + PRE_HOLD, w[1], w[2]) for w in way]
