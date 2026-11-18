@@ -9,12 +9,14 @@ timeline (see JUDGE.md for every criterion, upstream vs here).  Detection rules 
               or the bulb was re-gripped after it had been measured tight and released (a re-tighten)
   retry       a setback followed by a redo (progress rising again or a re-grip); stroke re-grips with progress
               holding are not retries (clockwork-5 D1)
-  irreversible
+  irreversible (ends a policy's episode; recorded but not stopping the expert, whose upstream verdict needs its whole
+  rollout)
               forced_door     the leaf opened >= 1 deg before the latch had ever cleared the strike (the row's own
                               "unlocked_by_knob_then_opened" can no longer pass)
               part_dropped    the bulb is off the socket axis by > 30 mm, or 30 mm below the socket top
-              force_limit     a pad (door) or the summed robot-bulb contact (bulb) above FORCE_LIMIT_N for
-                              FORCE_LIMIT_FRAMES frames: 4x the finger drive's own effort ceiling
+              force_limit     above 4x the finger drive's own force ceiling (the row's finger effort limit) for
+                              FORCE_LIMIT_FRAMES frames: per pad (door), or 2 pads' worth on the summed robot-object
+                              contact (bulb, dial, nut); never below FORCE_LIMIT_N
               sim_diverged    a non-finite state
 """
 
@@ -71,8 +73,7 @@ class Adapter:
     def monitor(self, t):
         q = self.rig.s0.joint_q.numpy()
         if not np.isfinite(q).all():
-            self.ep.ev.fatal(t, "sim_diverged")
-            self.ep.end("irreversible")
+            self._fatal(t, "sim_diverged")
 
     def _grip_update(self, t, gripped: bool):
         ch = self.grip.update(gripped)
@@ -92,10 +93,24 @@ class Adapter:
             self.ep.ev.retry(self.setback["t"], self.setback["kind"], redo=how, t_redo=round(float(t), 3))
             self.setback = None
 
-    def _force(self, t, f):
-        self.over = self.over + 1 if f > FORCE_LIMIT_N else 0
+    def force_limit(self, summed: bool) -> float:
+        """4x the finger drive's own force ceiling (the row's finger effort limit), per pad, or for both pads when the
+        probe sums the hand's contacts; never below FORCE_LIMIT_N."""
+        ceiling = float(self.rig.model.joint_effort_limit.numpy()[7])
+        return max(FORCE_LIMIT_N, 4.0 * ceiling * (2.0 if summed else 1.0))
+
+    def _force(self, t, f, summed=False):
+        lim = self.force_limit(summed)
+        self.over = self.over + 1 if f > lim else 0
         if self.over == FORCE_LIMIT_FRAMES:
-            self.ep.ev.fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=FORCE_LIMIT_N)
+            self._fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=round(lim, 1),
+                        measured="summed robot-object contact" if summed else "per pad")
+
+    def _fatal(self, t, kind, **kw):
+        """An irreversible event ends a policy's episode; the expert's is recorded but runs to its own end (its
+        upstream verdict needs the whole rollout)."""
+        self.ep.ev.fatal(t, kind, **kw)
+        if not self.ep.expert_driven:
             self.ep.end("irreversible")
 
     def check_end(self):
@@ -172,10 +187,11 @@ class DoorAdapter(Adapter):
         if self.t_clear is None and self.latch_mm > self.jamb_mm:
             self.t_clear = t
         if self.t_clear is None and self.door_deg >= 1.0:
-            self.ep.ev.fatal(t, "forced_door", door_deg=round(self.door_deg, 2),
-                             note="the leaf opened >= 1 deg before the latch cleared the strike")
-            self.ep.end("irreversible")
-            return
+            if not any(e["kind"] == "forced_door" for e in self.ep.ev.irreversible):
+                self._fatal(t, "forced_door", door_deg=round(self.door_deg, 2),
+                            note="the leaf opened >= 1 deg before the latch cleared the strike")
+            if self.ep.done:
+                return
         # progress: the knob angle until the latch clears, then the door angle
         if self.knob_deg > self.max_knob + 10.0 or self.door_deg > self.max_door + 2.0:
             self._redo(t, "progress")
@@ -330,7 +346,7 @@ class BulbAdapter(Adapter):
         kt, r = self.kt, self.ex.log[-1]
         c = lambda n: float(self._c(r, n))  # noqa: E731
         fL, fR, yaw = c("fL"), c("fR"), c("yaw")
-        self._force(t, c("robot"))
+        self._force(t, c("robot"), summed=True)
         ch = self.gripping.update(min(fL, fR) > self.PAD_N)
         if ch > 0:
             self.n_grips += 1
@@ -344,9 +360,10 @@ class BulbAdapter(Adapter):
             self.released_tight = True
         # off the socket: dropped
         if c("axis_err") > 0.030 or c("Z") < -0.030:
-            self.ep.ev.fatal(t, "part_dropped", axis_err_mm=round(c("axis_err") * 1e3, 1), Z_mm=round(c("Z") * 1e3, 1))
-            self.ep.end("irreversible")
-            return
+            if not any(e["kind"] == "part_dropped" for e in self.ep.ev.irreversible):
+                self._fatal(t, "part_dropped", axis_err_mm=round(c("axis_err") * 1e3, 1), Z_mm=round(c("Z") * 1e3, 1))
+            if self.ep.done:
+                return
         if self.y_touch is None and c("thread") > self.THREAD_TOUCH_N:
             self.y_touch, self.t_touch = yaw, t
         if self.t_seat is None and self.t_touch is not None and c("seat") > kt.F_SEAT_TOUCH:
@@ -544,7 +561,7 @@ class DialAdapter(Adapter):
         if self.ep.done or not self.ex.log or self.t_judge is not None:
             return
         r = self.ex.log[-1]
-        self._force(t, r["robot"])
+        self._force(t, r["robot"], summed=True)
         ch = self._grip_update(t, min(r["fL"], r["fR"]) > GRIP_N)
         err = abs(r["ang"] - self.target)
         if self.best_err is None or err < self.best_err - np.radians(10.0):
@@ -687,14 +704,15 @@ class NutAdapter(Adapter):
         if self.ep.done or not self.log or self.t_judge is not None:
             return
         _, z, rc, fl, fr = self.log[-1]
-        self._force(t, rc)
+        self._force(t, rc, summed=True)
         self._grip_update(t, min(fl, fr) > 1.0)
         tips, nut = self._tips()
         if np.hypot(nut[0], nut[1]) > 0.010 or z > float(self.sn.Z_START) + 0.008 or z < -0.02:
-            self.ep.ev.fatal(t, "part_dropped", nut_xy_mm=[round(float(v) * 1e3, 1) for v in nut[:2]],
-                             nut_z_mm=round(float(z) * 1e3, 2))
-            self.ep.end("irreversible")
-            return
+            if not any(e["kind"] == "part_dropped" for e in self.ep.ev.irreversible):
+                self._fatal(t, "part_dropped", nut_xy_mm=[round(float(v) * 1e3, 1) for v in nut[:2]],
+                            nut_z_mm=round(float(z) * 1e3, 2))
+            if self.ep.done:
+                return
         if z < self.min_z - self.lead * 10.0 / 360:
             self._redo(t, "progress")
         if z > self.min_z + self.lead * BACKOUT_DEG / 360:
