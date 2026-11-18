@@ -801,14 +801,15 @@ class NutAdapter(Adapter):
         grip = np.flatnonzero((fl > 1.0) & (fr > 1.0))
         i_rel = int(grip[-1]) if len(grip) else 0
         t_rel = float(t[i_rel])
-        before = (t >= t_rel - 0.3) & (t <= t_rel)
-        z_rel = float(np.median(z[before])) if before.any() else float(z[i_rel])
+        after = (t >= t_rel + 0.1) & (t <= t_rel + 0.4)       # just after the pads have let go
+        z_rel = float(np.median(z[after])) if after.any() else float(z[i_rel])
         crit["nut_stays_put_after_release"] = {
             "pass": bool(abs(float(z[-1]) - z_rel) < 0.0003), "z_before_release_mm": round(z_rel * 1e3, 3),
             "final_z_mm": round(float(z[-1]) * 1e3, 3), "release_at_s": round(t_rel, 3),
-            "upstream": "identical threshold; the release is the last frame both pads gripped (> 1 N), the end of the "
-                        "grip (upstream: the end of the expert's plan, while it still grips). The last contact would "
-                        "be later: the opening pads drag the nut up in the thread play, and it settles back"}
+            "upstream": "identical threshold: the nut's height just after the pads let go (0.1-0.4 s after the last "
+                        "frame both gripped > 1 N) against its final height. Upstream compares the end of the expert's "
+                        "plan, also after the release; measuring before the release would count the last stroke's own "
+                        "descent as movement"}
         dz = np.gradient(z, t) if len(t) > 2 else np.zeros_like(t)
         screwing = (dz < -self.DESCEND) & (rc >= self.free_n)
         crit["real_finger_grasp"] = {
