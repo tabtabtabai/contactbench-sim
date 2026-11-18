@@ -196,7 +196,8 @@ def main(argv=None):
         elif ph in ("turn", "pause"):
             if latch < clear_m:                   # still in the strike: advance, bounded ahead of the knob
                 rate = ramped(TURN_RATE, t - st["t_phase"], T_turn["deg"][-1] - st["psi"])
-                st["psi"] = min(st["psi"] + rate * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
+                # never commanded back: a knob creeping back in the pinch must not pull the hand round with it
+                st["psi"] = max(st["psi"], min(st["psi"] + rate * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1]))
                 if partial and st["psi"] >= T_turn["deg"][-1] - 1e-6 and ph == "turn":
                     go("pause", t)                # one grasp reaches no further (a partial plan): stop turning
             elif ph == "turn":
@@ -231,7 +232,8 @@ def main(argv=None):
         elif ph in ("lift", "hold"):
             if latch < clear_m and door_deg < 5.0:   # the latch slipped back before the door opened: turn again
                 rate = ramped(TURN_RATE, t - st["t_phase"], T_turn["deg"][-1] - st["psi"])
-                st["psi"] = min(st["psi"] + rate * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1])
+                # never commanded back: a knob creeping back in the pinch must not pull the hand round with it
+                st["psi"] = max(st["psi"], min(st["psi"] + rate * dt, knob_deg + TURN_LEAD, T_turn["deg"][-1]))
             open_to = min(OPEN_TO_DEG, float(T_lift["deg"][-1]))   # as far as the arm reaches (>= 10 deg)
             rate = ramped(LIFT_RATE, t - st["t_phase"] if ph == "lift" else RAMP_S, open_to - st["phi"])
             st["phi"] = min(st["phi"] + rate * dt, door_deg + LIFT_LEAD, open_to)
