@@ -171,3 +171,28 @@ def camera_mounts(npz_path, side: str) -> list:
         T[:3, :3], T[:3, 3] = _rot(d["cam_quat"][i]), d["cam_pos"][i]
         out.append((label, PREFIX + bodies[int(d["cam_body"][i])], T, float(d["cam_fovy"][i])))
     return out
+
+
+DEX1_RATED_GRIP_N = (5.0, 120.0)   # the Dex1's grip force range (matrix sims/mujoco scene: "Dex1 spec: 5-120 N grip")
+
+
+def variant_params() -> dict:
+    """Every physics and control value this embodiment sets that is not the robot model's own, with its source, for
+    the episode record (``robot_variant_params``).  Published episodes must stay inside the real Dex1's ratings."""
+    if not DEX1_RATED_GRIP_N[0] <= FINGER_EFFORT <= DEX1_RATED_GRIP_N[1]:
+        raise ValueError(f"squeeze {FINGER_EFFORT} N is outside the Dex1's rated {DEX1_RATED_GRIP_N} N")
+    return {
+        "finger_effort_N": FINGER_EFFORT,
+        "finger_effort_source": "the Dex1's rated grip, 5-120 N per finger (matrix sims/mujoco scene, Dex1 spec)",
+        "pad_mu": PAD_MU,
+        "pad_mu_source": ("matrix's MuJoCo Isaac Dex1 contact friction (sims/mujoco isaac_dex1.py: 'initial contact "
+                          "parameters, not an identified PhysX material equivalence'); not measured on the real pads"
+                          if PAD_MU == 1.0 else "NON-DEFAULT: a diagnostic value, not for published episodes"),
+        "arm_kp_scale": ARM_KP_SCALE,
+        "arm_kp_source": "10x matrix's MuJoCo arm actuator kp (300 shoulder/elbow, 80 wrist); effort caps unchanged "
+                         "(25 / 5 N.m); stands in for the whole-body controller's tracking",
+        "gravity_feedforward": True,
+        "gravity_source": "the arm's gravity torques from the same MuJoCo model, fed forward (the whole-body "
+                          "controller's gravity compensation)",
+        "finger_collision": "a box per Dex1 finger link fitted to its collision mesh (MuJoCo collides meshes as hulls)",
+    }
