@@ -177,7 +177,11 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
     spec, argv = _row_argv(task, seed)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    os.environ["TB_OUT_ROOT"] = str(out_dir)
+    # the row writes under common.APPENDIX_OUT (resolved from TB_OUT_ROOT when force_bench is first imported, which
+    # is before this): point it at the episode's folder for this run
+    import force_bench.appendix_tasks.common as common
+    appendix_out = common.APPENDIX_OUT
+    common.APPENDIX_OUT = out_dir / "appendix_tasks"
     adapter_cls = adapter_for(spec.module)
     mod = importlib.import_module(spec.dotted)
     box = {}
@@ -229,6 +233,7 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
         print(f"[policy_env] upstream verdict failed on this rollout: {upstream_error}", flush=True)
     finally:
         sys.argv = sys_argv
+        common.APPENDIX_OUT = appendix_out
         for cls, fn in originals:
             cls.run = fn
         driver.close()
