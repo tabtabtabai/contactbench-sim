@@ -377,12 +377,18 @@ class BulbAdapter(Adapter):
         self.max_turns = max(self.max_turns, n)
         # tight, measured as the row measures it: seated, pad torque >= TAU_TIGHT with the flanks preloaded, then
         # the part stalled (< STALL_HOLD_DEG) over T_TIGHT_CONFIRM
-        pre = -c("flank_z") >= kt.PRELOAD_TIGHT
+        # (sampled as the judge's _tight_index: hold from frame i, yaw one frame later, preload at the confirm frame)
+        k = len(self.ex.log) - 1
+        n_conf = int(round(kt.T_TIGHT_CONFIRM * self.ep.fps))
         if self.t_tight is None and self.t_seat is not None:
-            if self.hold is None and c("tau_pads") >= kt.TAU_TIGHT and pre:
-                self.hold = (t, yaw)
-            elif self.hold is not None and t - self.hold[0] >= kt.T_TIGHT_CONFIRM:
-                if abs(yaw - self.hold[1]) < np.radians(kt.STALL_HOLD_DEG) and pre:
+            if self.hold is None and c("tau_pads") >= kt.TAU_TIGHT and -c("flank_z") >= kt.PRELOAD_TIGHT:
+                self.hold = k
+            elif self.hold is not None and k >= self.hold + n_conf + 1:
+                i = self.hold
+                y0 = float(self._c(self.ex.log[i + 1], "yaw"))
+                y1 = float(self._c(self.ex.log[i + n_conf + 1], "yaw"))
+                if abs(y1 - y0) < np.radians(kt.STALL_HOLD_DEG) and \
+                        -float(self._c(self.ex.log[i + n_conf], "flank_z")) >= kt.PRELOAD_TIGHT:
                     self.t_tight, self.y_tight = t, yaw
                 self.hold = None
         # the hand has left for good: clear of the bulb for CLEAR_S and moved AWAY_M from where it held it
@@ -514,20 +520,25 @@ class BulbAdapter(Adapter):
                 "t_end_s": round(float(t[-1]), 3)}
 
     def _tight_index(self, C, i_s):
-        """First frame at which the measured tightness condition completes (see monitor())."""
+        """First frame at which the row's tightness condition completes, sampled as the row's expert samples it: the
+        torque and preload of frame i start the hold; the part's yaw is read one frame later (the log's yaw column
+        is the state the next control step sees), over T_TIGHT_CONFIRM; the preload is checked again at the confirm
+        frame.  (Reading both at frame i counted a spike's own settling as turning: seed 4 measured 1.01 deg where
+        the expert, and the physics after the spike, had 0.41 deg.)"""
         kt = self.kt
         if i_s is None:
             return None
-        t, yaw = C["t"], C["yaw"]
+        yaw = np.r_[C["yaw"][1:], C["yaw"][-1:]]          # the yaw of the state after frame k
         ok = (C["tau_pads"] >= kt.TAU_TIGHT) & (-C["flank_z"] >= kt.PRELOAD_TIGHT)
         n = int(round(kt.T_TIGHT_CONFIRM * self.ep.fps))
         for i in np.flatnonzero(ok):
-            if i < i_s or i + n >= len(t):
-                continue
             j = i + n
+            if i < i_s or j >= len(C["t"]) - 1:
+                continue
             if abs(yaw[j] - yaw[i]) < np.radians(kt.STALL_HOLD_DEG) and -C["flank_z"][j] >= kt.PRELOAD_TIGHT:
                 return int(j)
         return None
+
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
