@@ -20,7 +20,9 @@ import warp as wp
 from force_bench.recorder import BG_BOTTOM, BG_TOP, _resolve_frame_kernel, lookat_transform
 
 GL_TO_CV = np.diag([1.0, -1.0, -1.0])
-WRIST_IN_HAND = np.array([0.0, -0.055, 0.020])     # hand frame: z toward the fingers, y along the finger travel
+WRIST_IN_HAND = np.array([0.075, 0.0, 0.010])      # hand frame: z toward the fingers, y the finger travel; the camera
+#                                                     sits beside the hand, across the fingers, so neither finger hides
+#                                                     the part between them
 WRIST_LOOK_IN_HAND = np.array([0.0, 0.0, 0.105])   # the pads' centre
 
 
@@ -66,15 +68,16 @@ class PolicyCameras:
                         @ _mat_of(rig.ik.body_pose("fr3/fr3_hand")))
         self.root = _mat_of(rig.robot_base)                          # fr3_link0 in the world
         self.root_inv = np.linalg.inv(self.root)
+        self._cache = None
 
     def _k_from_rays(self, i) -> list:
-        r = self.rays.numpy()
-        r = r.reshape(-1, self.height, self.width, 3)[i] if r.ndim != 4 or r.shape[0] != 3 else r[i]
-        d = r / -r[..., 2:3]                                         # GL: forward is -z; normalise to z = 1 depth
-        fx = (self.width - 1) / (d[0, -1, 0] - d[0, 0, 0])
-        fy = (self.height - 1) / abs(d[-1, 0, 1] - d[0, 0, 1])
-        cx = -d[0, 0, 0] * fx
-        cy = d[0, 0, 1] * fy                                         # GL +y up -> OpenCV +y down
+        """K from the renderer's own per-pixel rays ((camera, h, w, [origin, direction], 3), GL camera axes, rays
+        through pixel centres): no reading of the FOV convention (the configured angle is the VERTICAL one)."""
+        d = self.rays.numpy()[i][..., 1, :]
+        tx, ty = d[..., 0] / -d[..., 2], d[..., 1] / -d[..., 2]      # tangents at depth 1 (GL looks along -z)
+        fx = (self.width - 1) / (tx[0, -1] - tx[0, 0])
+        fy = (self.height - 1) / (ty[0, 0] - ty[-1, 0])               # GL +y up, OpenCV +v down
+        cx, cy = -tx[0, 0] * fx, ty[0, 0] * fy
         return [[float(fx), 0.0, float(cx)], [0.0, float(fy), float(cy)], [0.0, 0.0, 1.0]]
 
     def _wrist_world(self, bq) -> np.ndarray:
@@ -82,7 +85,8 @@ class PolicyCameras:
         p = H[:3, :3] @ WRIST_IN_HAND + H[:3, 3]
         tgt = H[:3, :3] @ WRIST_LOOK_IN_HAND + H[:3, 3]
         fwd = (tgt - p) / np.linalg.norm(tgt - p)
-        up_hint = -H[:3, 1]                                          # image up = away from the camera's side
+        up_hint = H[:3, 0]                                           # the camera's own side up: the fingers low in
+#                                                                      the image
         x = np.cross(fwd, up_hint)
         x /= np.linalg.norm(x)
         y = np.cross(x, fwd)
@@ -91,6 +95,15 @@ class PolicyCameras:
         return M
 
     def capture(self, t_s: float) -> dict:
+        """The three views and their calibration at the current state (cached for the frame: a policy request and
+        the episode's camera videos share one render)."""
+        if self._cache is not None and self._cache[0] == t_s:
+            return self._cache[1]
+        out = self._render(t_s)
+        self._cache = (t_s, out)
+        return out
+
+    def _render(self, t_s: float) -> dict:
         state = self.rig.s0
         bq = state.body_q.numpy()
         worlds = [*self.scene_world, self._wrist_world(bq)]

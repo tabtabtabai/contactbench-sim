@@ -59,7 +59,10 @@ class _EndEpisode(Exception):
 class Episode:
     """One episode on a built rig.  ``step(action)`` advances one control frame (1/fps s of world time)."""
 
-    def __init__(self, rig, control_cb, extra_cb, adapter_cls, *, task: str, seed, cameras: bool = True):
+    VIDEO_HZ = 15
+
+    def __init__(self, rig, control_cb, extra_cb, adapter_cls, *, task: str, seed, cameras: bool = True,
+                 video_dir=None):
         import newton
         newton.use_coord_layout_targets = True
         self.rig, self.control_cb, self.extra_cb = rig, control_cb, extra_cb
@@ -77,9 +80,13 @@ class Episode:
         self.expert_driven = False
         self.adapter = adapter_cls(self)
         self.cams = None
+        self.videos = {}
         if cameras:
             from force_bench.policy_env.cameras import PolicyCameras
             self.cams = PolicyCameras(rig, **self.adapter.camera_layout())
+            if video_dir is not None:
+                self.videos = _CameraVideos(Path(video_dir), self.cams.NAMES, self.VIDEO_HZ)
+                self._record_views()
 
     # ── robot state (what a policy may see) ─────────────────────────────────────────────────────────────────────
     def joints(self) -> np.ndarray:
@@ -143,14 +150,52 @@ class Episode:
         if rig.rec is not None:
             rig.rec.capture(rig.s0, self.t, forces=forces)
         self.adapter.monitor(self.t)
+        if self.videos and self.frame % (self.fps // self.VIDEO_HZ) == 0:
+            self._record_views()
         if self.frame % 60 == 0:
             print(f"[policy_env] t={self.t:6.2f}s {self.adapter.status_line()}", flush=True)
+
+    def _record_views(self):
+        """The policy cameras at 15 Hz of world time, every frame stepped: a real-time run's thinking time is in the
+        video as the world it was."""
+        self.videos.append(self.cams.capture(self.t)["images"])
+
+    def close_videos(self) -> list:
+        return self.videos.close() if self.videos else []
 
     def end(self, reason: str):
         if not self.done:
             self.done, self.done_reason = True, reason
             if self.t_policy_end is None:
                 self.t_policy_end = self.t
+
+
+class _CameraVideos:
+    def __init__(self, folder: Path, names, fps):
+        import imageio_ffmpeg
+        self.folder, self.names, self.fps = folder, list(names), fps
+        self.paths = {n: folder / f"camera_{n}.mp4" for n in self.names}
+        self.w = {}
+        self._ff = imageio_ffmpeg
+
+    def __bool__(self):
+        return True
+
+    def append(self, images: dict):
+        for n in self.names:
+            img = np.ascontiguousarray(images[n])
+            if n not in self.w:
+                h, w = img.shape[:2]
+                self.w[n] = self._ff.write_frames(str(self.paths[n]), (w, h), fps=self.fps, codec="libx264",
+                                                  macro_block_size=2, output_params=["-crf", "23"])
+                self.w[n].send(None)
+            self.w[n].send(img)
+
+    def close(self) -> list:
+        for wr in self.w.values():
+            wr.close()
+        self.w = {}
+        return [str(p) for p in self.paths.values() if p.exists()]
 
 
 # ── running a row ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -189,7 +234,8 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
 
     def patched(rig_self, duration, control_cb, extra_forces_cb=None, print_every=20):
         from force_bench.appendix_tasks.common import StopRun
-        ep = Episode(rig_self, control_cb, extra_forces_cb, adapter_cls, task=task, seed=seed, cameras=cameras)
+        ep = Episode(rig_self, control_cb, extra_forces_cb, adapter_cls, task=task, seed=seed, cameras=cameras,
+                     video_dir=out_dir if cameras else None)
         box["ep"] = ep
         driver.begin(ep)
         # the expert runs to its own ending (StopRun) or the row's own duration, never cut short by the online
@@ -207,6 +253,7 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
             ep.end("expert_finished")
         ep.adapter.judge_phase()
         box["judge"] = ep.adapter.judge()
+        box["camera_videos"] = ep.close_videos()
         if with_upstream and ep.adapter.upstream_ok():
             return rig_self.rec          # the row's main() goes on to its own verdict on this rollout
         if rig_self.rec is not None:
@@ -241,5 +288,7 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
     qa_path = next(out_dir.rglob("appendix_qa.json"), None)
     if qa_path is not None and with_upstream and ep.adapter.upstream_ok() and upstream_error is None:
         upstream = json.loads(qa_path.read_text())
+    third = sorted(str(p) for p in out_dir.rglob("rollout*.mp4"))
     return {"episode": ep, "judge": box["judge"], "upstream": upstream, "upstream_error": upstream_error,
+            "videos": {"cameras": box.get("camera_videos", []), "third_person": third},
             "t_host_s": time.time() - t_host0, "row_argv": argv}
