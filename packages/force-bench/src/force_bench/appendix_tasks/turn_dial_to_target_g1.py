@@ -29,7 +29,7 @@ import warp as wp
 from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, appendix_rig, sample_start
 from force_bench.appendix_tasks.turn_dial_to_target import (DIAL_KEYS, DIAL_PLACE, IMPRATIO, ITERS, KNOB_LABELS,
                                                             SUBSTEPS, T_STILL)
-from force_bench.g1.robot import SumProbe, add_g1, camera_mounts, q_indices
+from force_bench.g1.robot import SumProbe, add_g1, apply_look, camera_mounts, q_indices
 from force_bench.kit import add_asset, place_on_table
 from force_bench.kit.mechanisms import dial as D
 from force_bench.rig import make_solver
@@ -110,6 +110,7 @@ def main(argv=None):
     rig.probes.update(probes)
     rig.pad_probes = ("finL", "finR")
     rig.camera_mounts = camera_mounts(a.model, side)
+    apply_look(rig.model)                        # after the recorder's palette (finalize)
     tips = [g1["bodies"][f"{side}_hand_Link{i}_3"] for i in (1, 2)]
     lg = G1DialLog(rig, h, probes, tips, np.radians(traj["target_deg"]))
     qi = q_indices(rig.model, g1["joints"])

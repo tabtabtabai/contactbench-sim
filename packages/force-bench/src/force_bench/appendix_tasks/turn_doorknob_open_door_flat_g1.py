@@ -37,7 +37,7 @@ from force_bench.appendix_tasks._door_kit import (LOCK_PROBE_NM, LOCK_PROBE_S, H
                                                   door_pose, drawn_shapes, joint_reader, lock_probe_check,
                                                   pads_check)
 from force_bench.appendix_tasks.common import StopRun, appendix_rig
-from force_bench.g1.robot import SumProbe, add_g1, camera_mounts, q_indices
+from force_bench.g1.robot import SumProbe, add_g1, apply_look, camera_mounts, q_indices
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver
 
@@ -100,6 +100,7 @@ def main(argv=None):
         rig.probes[f"g1/pad{i}"] = SumProbe([rig.probes.pop(lb) for lb in links[i]])
     rig.pad_probes = ("g1/pad1", "g1/pad2")
     rig.camera_mounts = camera_mounts(a.model, side)
+    apply_look(rig.model)                        # after the recorder's palette (finalize)
     rig.solver = make_solver(rig.model, iterations=24, **{**rig.solver_options, "impratio": IMPRATIO})
     probe = HingeProbe(rig, h)
     jq = joint_reader(rig, h)

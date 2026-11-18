@@ -196,3 +196,29 @@ def variant_params() -> dict:
                           "controller's gravity compensation)",
         "finger_collision": "a box per Dex1 finger link fitted to its collision mesh (MuJoCo collides meshes as hulls)",
     }
+
+
+# the real G1's look (visual only): dark grey body shells, silver-grey joint housings, black Dex1 hands
+G1_SHELL, G1_JOINT, G1_HAND = (0.13, 0.13, 0.14), (0.58, 0.59, 0.61), (0.04, 0.04, 0.045)
+_SHELLS = ("pelvis", "torso", "knee", "elbow", "head", "logo", "hip_pitch", "shoulder_pitch", "waist_yaw")
+
+
+def apply_look(model: newton.Model) -> None:
+    """Colour every g1/ shape like the real robot, after the recorder's studio palette (which gives each link a
+    random bright colour).  kit_look leaves robot shapes alone, so this sticks."""
+    cols = model.shape_color.numpy().copy()
+    sb = model.shape_body.numpy()
+    bl = [str(b) for b in model.body_label]
+    for i, lbl in enumerate(model.shape_label):
+        body = bl[int(sb[i])] if sb[i] >= 0 else ""
+        if not body.startswith(PREFIX):
+            continue
+        name = body[len(PREFIX):]
+        if "hand" in name or "dex1" in name or "finger" in name:
+            c = G1_HAND
+        elif any(k in name for k in _SHELLS):
+            c = G1_SHELL
+        else:
+            c = G1_JOINT
+        cols[i] = c
+    model.shape_color.assign(np.asarray(cols, dtype=np.float32))
