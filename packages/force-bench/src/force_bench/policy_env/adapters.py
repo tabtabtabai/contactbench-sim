@@ -695,6 +695,9 @@ class NutAdapter(Adapter):
         self.free_n = CONTACT_FREE_N
         self.fl, self.fr = self.rig.body_index("fr3/fr3_leftfinger"), self.rig.body_index("fr3/fr3_rightfinger")
         self.min_z = float(sn.Z_START)
+        self.yaw = None              # the nut's unwrapped rotation about the bolt axis, rad
+        self._yaw_prev = None
+        self.best_turn = 0.0         # best tighten-way rotation, turns (progress for setbacks: z bobs in the thread play)
         self.clear_since = None
         self.d0 = None
         self.t_judge = None
@@ -725,11 +728,22 @@ class NutAdapter(Adapter):
                             nut_z_mm=round(float(z) * 1e3, 2))
             if self.ep.done:
                 return
-        if z < self.min_z - self.lead * 10.0 / 360:
+        # progress on the nut's ROTATION (tighten-way = clockwise from above, negative yaw): its height bobs in the
+        # thread play by more than 30 deg of lead whenever the pads let go, so height would see false back-outs
+        q = self.rig.s0.body_q.numpy()[self.ni][3:7]
+        a = 2.0 * np.arctan2(q[2], q[3])
+        if self._yaw_prev is None:
+            self.yaw, self._yaw0 = a, a
+        else:
+            self.yaw += (a - self._yaw_prev + np.pi) % (2 * np.pi) - np.pi
+        self._yaw_prev = a
+        turn = float(-(self.yaw - self._yaw0) / (2 * np.pi))
+        if turn > self.best_turn + 10.0 / 360:
             self._redo(t, "progress")
-        if z > self.min_z + self.lead * BACKOUT_DEG / 360:
-            self._set_back(t, "back_out", turns=round(self.turns(z), 3), best_turns=round(self.turns(), 3))
-            self.min_z = z
+        if turn < self.best_turn - BACKOUT_DEG / 360:
+            self._set_back(t, "back_out", turns=round(turn, 3), best_turns=round(self.best_turn, 3))
+            self.best_turn = turn
+        self.best_turn = max(self.best_turn, turn)
         self.min_z = min(self.min_z, z)
         if not self.ep.expert_driven:
             d = float(np.linalg.norm(tips - nut))
@@ -784,16 +798,17 @@ class NutAdapter(Adapter):
             "engaged_when_centre_below_mm": round(sn.ENGAGED_Z * 1e3, 2), "turns_screwed": round(turns, 2),
             "engagement_depth_mm": round(self.engagement_mm(float(z[-1])), 2),
             "nut_height_mm": round(sn.NUT_H * 1e3, 2), "upstream": "identical"}
-        touch = np.flatnonzero(rc >= self.free_n)
-        i_rel = int(touch[-1]) if len(touch) else 0
+        grip = np.flatnonzero((fl > 1.0) & (fr > 1.0))
+        i_rel = int(grip[-1]) if len(grip) else 0
         t_rel = float(t[i_rel])
         before = (t >= t_rel - 0.3) & (t <= t_rel)
         z_rel = float(np.median(z[before])) if before.any() else float(z[i_rel])
         crit["nut_stays_put_after_release"] = {
             "pass": bool(abs(float(z[-1]) - z_rel) < 0.0003), "z_before_release_mm": round(z_rel * 1e3, 3),
-            "final_z_mm": round(float(z[-1]) * 1e3, 3),
-            "upstream": "identical threshold; the release is the last robot-nut contact (upstream: the end of the "
-                        "expert's plan)"}
+            "final_z_mm": round(float(z[-1]) * 1e3, 3), "release_at_s": round(t_rel, 3),
+            "upstream": "identical threshold; the release is the last frame both pads gripped (> 1 N), the end of the "
+                        "grip (upstream: the end of the expert's plan, while it still grips). The last contact would "
+                        "be later: the opening pads drag the nut up in the thread play, and it settles back"}
         dz = np.gradient(z, t) if len(t) > 2 else np.zeros_like(t)
         screwing = (dz < -self.DESCEND) & (rc >= self.free_n)
         crit["real_finger_grasp"] = {
