@@ -39,13 +39,17 @@ from force_bench.appendix_tasks._door_kit import (LOCK_PROBE_NM, LOCK_PROBE_S, H
                                                   door_pose, drawn_shapes, joint_reader, lock_probe_check,
                                                   pads_check)
 from force_bench.appendix_tasks.common import StopRun, appendix_rig
-from force_bench.g1.robot import (ContactPeak, SumProbe, add_g1, apply_look, camera_mounts, floor_and_table,
-                                  init_pose, q_indices)
+from force_bench.g1.robot import (ContactPeak, SumProbe, add_g1, apply_look, camera_mounts, cap_headroom,
+                                  effective_arm_caps, floor_and_table, init_pose, q_indices,
+                                  TorqueMonitor)
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver
 
 NAME = "turn_doorknob_open_door_flat_g1"
 FINGER_OPEN, FINGER_CLOSE = -0.02, 0.0          # Dex1 finger joints: -0.02 = 83 mm open; 0.0 = 43 mm (< the knob)
+FINGER_CLOSE_BAR = 0.0245                       # fully closed: the lever's bar is far thinner than 43 mm (at 0.0 the
+#                                                 pads never pinched it: one pushed it, 6 N, the other 0 N); the
+#                                                 squeeze is the finger effort cap
 IMPRATIO = 10.0
 PRE_HOLD = 0.6                                  # s at the pre-grasp before descending (covers the lock probe)
 I_UP = 8                                        # the plan's first segment (straight up from the reset pose): 8 steps
@@ -89,6 +93,10 @@ def main(argv=None):
     pelvis = wp.transform(wp.vec3(*traj["pelvis_cb"]), wp.quat_identity())
     g1 = add_g1(rig.builder, a.model, pelvis)
     rig.robot_base = pelvis
+    # actuator + gravity feed-forward within the G1's torque limits: the feed-forward's peak over every plan table
+    tabs = [traj["tau_g"], traj["turn_table"]["tau_g"], traj["lift_table"]["tau_g"], traj.get("retreat_tau_g") or []]
+    ff = np.abs(np.concatenate([np.asarray(x, float).reshape(-1, len(traj["arm_joints"])) for x in tabs if len(x)]))
+    rig.effort_budget = cap_headroom(rig.builder, g1, traj["arm_joints"], ff.max(axis=0))
     # the table's near edge in front of the G1; the door at the row's (seeded) pose
     dk.TABLE_C = (float(traj["pelvis_cb"][0]) + 0.12 + dk.TABLE_HALF, dk.TABLE_C[1])
     choice = ({"Doorknob geometry": "Doorknob 1, 55mm diameter", "Amount of rotation to unlock": "60°",
@@ -116,6 +124,7 @@ def main(argv=None):
     for i in (1, 2):                             # each pad = its finger's two links
         rig.probes[f"g1/pad{i}"] = SumProbe([rig.probes.pop(lb) for lb in links[i]])
     rig.pad_probes = ("g1/pad1", "g1/pad2")
+    rig.arm_caps = effective_arm_caps(rig.model, g1)   # read back from the model; refuses an uncapped arm
     rig.contact_peak = rig.probes["g1/contact"] = ContactPeak(rig.model)   # names the pair behind any force peak
     rig.camera_mounts = camera_mounts(a.model, side)
     apply_look(rig.model, g1)                    # the G1's own colours, after the recorder's palette (finalize)
@@ -247,7 +256,7 @@ def main(argv=None):
         qt = rig.control.joint_target_q.numpy()
         for n, v in zip(arm_names, q):
             qt[tq_index[n]] = v
-        f = FINGER_CLOSE if close else FINGER_OPEN
+        f = (FINGER_CLOSE_BAR if a.part == "handle" else FINGER_CLOSE) if close else FINGER_OPEN
         for n in fingers:
             qt[tq_index[n]] = f
         rig.control.joint_target_q.assign(qt)
@@ -255,7 +264,10 @@ def main(argv=None):
         jf[f_index] = g
         rig.control.joint_f.assign(jf)
 
+    rig.torque_monitor = TorqueMonitor(rig.model, g1, arm_names, tq_index)
+
     def extra(state, t):
+        rig.torque_monitor.sample(state, rig.control, t, st["phase"])
         bq = state.body_q.numpy()
         q = state.joint_q.numpy()
         th, ph, x = door_angle(bq[leaf]), float(q[jq["knob"]]), float(q[jq["latch"]])

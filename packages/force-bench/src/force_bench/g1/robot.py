@@ -23,6 +23,32 @@ ARM_KP_SCALE = float(os.environ.get("G1_ARM_KP_SCALE", 1.0))   # the arm servo a
 # kp (300 shoulder/elbow, 80 wrist).  1x by default, with the gravity torques fed forward; at most 3x (a stiffer arm
 # turns any graze into an impact).  The joint effort caps stay the G1's (25 / 5 N.m).
 ARM_KP_MAX = 3.0
+# the G1's arm joint torque limits (URDF g1_29dof_*: <limit effort>), N.m: the exported MuJoCo model carries no
+# force range for the arm (0 = unlimited), so they are applied here
+ARM_EFFORT_NM = {"shoulder_pitch": 25.0, "shoulder_roll": 25.0, "shoulder_yaw": 25.0, "elbow": 25.0,
+                 "wrist_roll": 25.0, "wrist_pitch": 5.0, "wrist_yaw": 5.0}
+
+
+def cap_headroom(builder: newton.ModelBuilder, g1: dict, joint_names, tau_ff_max) -> dict:
+    """Cap each arm actuator at its URDF limit less the joint's largest gravity feed-forward (|tau| over the plan or
+    the row), so actuator + feed-forward never exceeds the G1's limit.  Returns {joint: {limit, ff_max, actuator}}."""
+    out = {}
+    for n, g in zip(joint_names, tau_ff_max):
+        cap = arm_cap(n)
+        if cap is None:
+            continue
+        d = int(builder.joint_qd_start[g1["joints"][n]])
+        act = max(0.0, cap - abs(float(g)))
+        builder.joint_effort_limit[d] = act
+        out[n] = {"limit_Nm": cap, "ff_max_Nm": round(abs(float(g)), 3), "actuator_cap_Nm": round(act, 3)}
+    return out
+
+
+def arm_cap(joint_name: str) -> float | None:
+    for k, v in ARM_EFFORT_NM.items():
+        if joint_name.endswith(f"_{k}_joint"):
+            return v
+    return None
 COLLIDE_BODIES = ("hand_Link1_2", "hand_Link1_3", "hand_Link2_2", "hand_Link2_3")
 
 
@@ -84,6 +110,8 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
             cxf = wp.transform(wp.vec3(*jpos), wp.quat_identity())
             kp, cap = drives.get(jn, (0.0, 0.0))
             finger = "finger" in jn
+            if not finger and not cap:
+                cap = arm_cap(jn) or 0.0               # the arm's URDF torque limit (the export has none)
             kp = kp if finger else kp * arm_kp_scale
             kd = (0.01 if finger else 0.04) * kp
             lo, hi = (float(v) for v in d["jnt_range"][j])
@@ -133,6 +161,11 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
                                               label=f"{PREFIX}{names[b]}_pad"))
         out["shapes"][names[b]] = sids
     builder.add_articulation(joints, label=PREFIX + "g1")
+    for jn, ji in out["joints"].items():          # never an unlimited arm joint (the export once carried none)
+        if arm_cap(jn) is not None:
+            lim = float(builder.joint_effort_limit[int(builder.joint_qd_start[ji])])
+            if not (0.0 < lim <= arm_cap(jn) + 1e-9):
+                raise ValueError(f"{jn}: effort limit {lim} is not within the G1's {arm_cap(jn)} N.m")
     return out
 
 
@@ -272,6 +305,11 @@ def variant_params() -> dict:
         "arm_kp_source": (f"{ARM_KP_SCALE:g}x matrix's MuJoCo arm actuator kp (300 shoulder/elbow, 80 wrist); effort "
                           "caps unchanged (25 / 5 N.m); with the gravity feed-forward it stands in for the "
                           "whole-body controller's tracking"),
+        "arm_effort_caps_Nm": dict(ARM_EFFORT_NM),
+        "arm_effort_caps_source": ("the G1 URDF (g1_29dof_*) joint <limit effort>.  The gravity feed-forward is a "
+                                   "joint torque outside the PD actuator, so each actuator is capped at the limit "
+                                   "less that joint's largest feed-forward over the plan (cap_headroom): the joint's "
+                                   "total stays within the limit"),
         "gravity_feedforward": True,
         "gravity_source": "the arm's gravity torques from the same MuJoCo model, fed forward (the whole-body "
                           "controller's gravity compensation)",
@@ -318,3 +356,181 @@ def init_pose(npz_path) -> dict:
     init = json.loads(str(d["arm_init_json"]))
     names = ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow", "wrist_roll", "wrist_pitch", "wrist_yaw")
     return {f"{side}_{n}_joint": float(v) for side, vals in init.items() for n, v in zip(names, vals)}
+
+
+# ── online control for rows without a precomputed plan (the kit's screw expert) ──────────────────────────────────
+PAD_CENTRE = np.array([0.0, 0.120, 0.0])     # the Dex1 pads' centre in the hand-base frame (95-145 mm span)
+# the FR3 TCP frame (z = approach, y = finger travel) -> the Dex1 hand frame (x = closing, y = approach, z = pad
+# width): R_dex1 = R_fr3_tcp @ TCP_TO_HAND
+TCP_TO_HAND = np.column_stack([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
+DEX1_HALF_GAP0 = 0.0215                      # finger joint 0 = a 43 mm pad gap; -0.02 = 83 mm (half-gap 0.0215 - q)
+
+
+def _R_xyzw(q):
+    x, y, z, w = (float(v) for v in q)
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def gravity_torques(model: newton.Model, body_q: np.ndarray, joints) -> np.ndarray:
+    """The torque each listed (revolute) joint must make to hold its distal bodies against gravity, from the live
+    body poses: the whole-body controller's gravity compensation, fed forward.  ``joints``: newton joint indices."""
+    g = np.asarray(model.gravity.numpy()).reshape(-1)[:3] if hasattr(model, "gravity") else np.array([0, 0, -9.81])
+    parent, child = model.joint_parent.numpy(), model.joint_child.numpy()
+    Xp, axes, qd0 = model.joint_X_p.numpy(), model.joint_axis.numpy(), model.joint_qd_start.numpy()
+    com, mass = model.body_com.numpy(), model.body_mass.numpy()
+    kids = {}
+    for j in range(len(child)):
+        kids.setdefault(int(parent[j]), []).append(int(child[j]))
+    out = np.zeros(len(joints))
+    for k, j in enumerate(joints):
+        pb = int(parent[j])
+        Rp, pp = (_R_xyzw(body_q[pb, 3:7]), body_q[pb, :3]) if pb >= 0 else (np.eye(3), np.zeros(3))
+        RX = _R_xyzw(Xp[j, 3:7])
+        point = pp + Rp @ Xp[j, :3]
+        axis = Rp @ RX @ axes[int(qd0[j])]
+        stack, tau = [int(child[j])], 0.0
+        while stack:
+            b = stack.pop()
+            stack += kids.get(b, [])
+            c = body_q[b, :3] + _R_xyzw(body_q[b, 3:7]) @ com[b]
+            tau += float(axis @ np.cross(c - point, mass[b] * g))
+        out[k] = -tau
+    return out
+
+
+class G1IK:
+    """Kinematic IK for one G1 arm on a private copy of the model (newton.ik), in the FR3 TCP convention the kit's
+    screw expert speaks: the TCP is the Dex1 pad centre, its frame mapped by TCP_TO_HAND.  Every other joint is held
+    at its start (joint-limit objective with lower = upper)."""
+
+    def __init__(self, npz_path, pelvis_xform, side: str, start_q: dict):
+        import newton.ik as ik
+        b = newton.ModelBuilder()
+        g = add_g1(b, npz_path, pelvis_xform)
+        qi = {n: int(b.joint_q_start[j]) for n, j in g["joints"].items()}
+        for n, v in start_q.items():
+            if n in qi:
+                b.joint_q[qi[n]] = float(v)
+        self.model = b.finalize()
+        self.side = side
+        self.hand = PREFIX + f"{side}_hand_base_link"
+        self.ee = list(self.model.body_label).index(self.hand)
+        self.arm = [n for n in g["joints"] if n.startswith(f"{side}_") and "dex1" not in n
+                    and any(k in n for k in ("shoulder", "elbow", "wrist"))]
+        self.arm_q = [qi[n] for n in self.arm]
+        q0 = self.model.joint_q.numpy()
+        lo, hi = self.model.joint_limit_lower.numpy().copy(), self.model.joint_limit_upper.numpy().copy()
+        dof = self.model.joint_qd_start.numpy()
+        armdof = {int(dof[g["joints"][n]]) for n in self.arm}
+        qs = self.model.joint_q_start.numpy()
+        for j in range(self.model.joint_count):          # lock every non-arm dof at its start value
+            d0 = int(dof[j])
+            if d0 in armdof or int(qs[j + 1] if j + 1 < len(qs) else len(q0)) - int(qs[j]) != 1:
+                continue
+            lo[d0] = hi[d0] = q0[int(qs[j])]
+        state = self.model.state()
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, state)
+        x = state.body_q.numpy()[self.ee]
+        self.pos = ik.IKObjectivePosition(link_index=self.ee, link_offset=wp.vec3(*PAD_CENTRE),
+                                          target_positions=wp.array([wp.vec3(*x[:3])], dtype=wp.vec3))
+        self.rot = ik.IKObjectiveRotation(link_index=self.ee, link_offset_rotation=wp.quat_identity(),
+                                          target_rotations=wp.array([wp.vec4(*x[3:7])], dtype=wp.vec4))
+        lim = ik.IKObjectiveJointLimit(joint_limit_lower=wp.array(lo, dtype=float),
+                                       joint_limit_upper=wp.array(hi, dtype=float), weight=100.0)
+        self.joint_q = self.model.joint_q.reshape((1, self.model.joint_coord_count))
+        self.solver = ik.IKSolver(model=self.model, n_problems=1, objectives=[self.pos, self.rot, lim],
+                                  lambda_initial=0.1, jacobian_mode=ik.IKJacobianType.ANALYTIC)
+
+    @staticmethod
+    def hand_quat(tcp_quat_xyzw) -> np.ndarray:
+        from force_bench.policy_env.cameras import _quat_xyzw
+        return np.asarray(_quat_xyzw(_R_xyzw(tcp_quat_xyzw) @ TCP_TO_HAND), float)
+
+    def solve(self, target_pos, target_quat, iterations: int = 16) -> np.ndarray:
+        """Returns the private model's joint_q (all joints); the arm's are at ``self.arm_q``."""
+        self.pos.set_target_position(0, wp.vec3(*np.asarray(target_pos, dtype=float)))
+        self.rot.set_target_rotation(0, wp.vec4(*self.hand_quat(target_quat)))
+        self.solver.step(self.joint_q, self.joint_q, iterations=iterations)
+        return self.joint_q.numpy()[0].copy()
+
+    def _state(self):
+        state = self.model.state()
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, state)
+        return state
+
+    def tcp_pose(self) -> np.ndarray:
+        x = self._state().body_q.numpy()[self.ee]
+        return np.r_[x[:3] + _R_xyzw(x[3:7]) @ PAD_CENTRE, x[3:7]]
+
+    def body_pose(self, label: str) -> np.ndarray:
+        return self._state().body_q.numpy()[list(self.model.body_label).index(label)].copy()
+
+    def residual(self, target_pos, target_quat):
+        """(position error m, rotation error rad) of the current solution against a TCP target."""
+        x = self.tcp_pose()
+        R = _R_xyzw(x[3:7])
+        Rt = _R_xyzw(target_quat) @ TCP_TO_HAND
+        return (float(np.linalg.norm(x[:3] - np.asarray(target_pos))),
+                float(np.arccos(np.clip((np.trace(R @ Rt.T) - 1) / 2, -1, 1))))
+
+
+class TorqueMonitor:
+    """Per arm joint, the torque it makes each frame (the PD actuator's law, clipped at its cap, plus the gravity
+    feed-forward), estimated from the state, targets and gains: the episode's peak |torque| against the G1's limit,
+    when and in which phase, and how many frames the actuator sat at its cap."""
+
+    def __init__(self, model, g1: dict, joint_names, tq_index: dict):
+        qs, ds = model.joint_q_start.numpy(), model.joint_qd_start.numpy()
+        self.names = list(joint_names)
+        js = [g1["joints"][n] for n in self.names]
+        self.qi = np.array([int(qs[j]) for j in js])
+        self.di = np.array([int(ds[j]) for j in js])
+        self.ti = np.array([int(tq_index[n]) for n in self.names])
+        self.ke = model.joint_target_ke.numpy()[self.di].astype(float)
+        self.kd = model.joint_target_kd.numpy()[self.di].astype(float)
+        self.cap = model.joint_effort_limit.numpy()[self.di].astype(float)
+        self.limit = np.array([arm_cap(n) or np.inf for n in self.names])
+        n = len(self.names)
+        self.peak, self.t_peak, self.ph_peak = np.zeros(n), np.zeros(n), [None] * n
+        self.sat = np.zeros(n, int)
+        self.over = np.zeros(n, int)
+
+    def sample(self, state, control, t, phase=None):
+        q = state.joint_q.numpy()[self.qi]
+        qd = state.joint_qd.numpy()[self.di]
+        qt = control.joint_target_q.numpy()[self.ti]
+        ff = control.joint_f.numpy()[self.di]
+        raw = self.ke * (qt - q) - self.kd * qd
+        act = np.clip(raw, -self.cap, self.cap)
+        tot = np.abs(act + ff)
+        self.sat += (np.abs(raw) >= self.cap - 1e-9).astype(int)
+        self.over += (tot > self.limit + 1e-6).astype(int)
+        m = tot > self.peak
+        self.peak[m], self.t_peak[m] = tot[m], t
+        for k in np.flatnonzero(m):
+            self.ph_peak[k] = phase
+
+    def summary(self) -> dict:
+        return {n: {"peak_Nm": round(float(self.peak[k]), 3), "limit_Nm": float(self.limit[k]),
+                    "margin_Nm": round(float(self.limit[k] - self.peak[k]), 3), "t": round(float(self.t_peak[k]), 3),
+                    "phase": self.ph_peak[k], "frames_actuator_at_cap": int(self.sat[k]),
+                    "frames_over_limit": int(self.over[k])} for k, n in enumerate(self.names)}
+
+
+def effective_arm_caps(model: newton.Model, g1: dict) -> dict:
+    """The arm actuators' effort limits READ BACK from the finalized model (what the solver applies), against the G1's
+    limits.  Raises if any arm joint's range is 0 or unbounded: a G1 episode does not start uncapped."""
+    ds = model.joint_qd_start.numpy()
+    lim = model.joint_effort_limit.numpy()
+    out = {}
+    for jn, ji in g1["joints"].items():
+        cap = arm_cap(jn)
+        if cap is None:
+            continue
+        v = float(lim[int(ds[ji])])
+        if not (0.0 < v < 1e4) or v > cap + 1e-6:
+            raise SystemExit(f"refusing to run: {jn} effort range {v} (the G1 limit is {cap} N.m)")
+        out[jn] = {"limit_Nm": cap, "actuator_cap_Nm": round(v, 3)}
+    return out

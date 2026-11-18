@@ -194,6 +194,7 @@ RELAX_OPEN_MAX, RELAX_CLOSE_MAX = 0.0008, 0.0015
 
 # ── expert ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 YAW_HI, YAW_LO = np.radians(80.0), np.radians(-80.0)    # wrist window (IK-checked at build)
+HAND_BODY = "fr3/fr3_link7"              # the body the TCP rides on (an embodiment's row sets its own, with the window)
 OMEGA = 1.2               # rad/s wrist twist on the free thread
 OMEGA_ENGAGE = 1.0        # rad/s while the thread is being found
 OMEGA_TAKEUP = 0.8        # rad/s seated, before the flanks bear: the kit threads have ~2.6 mm of axial play
@@ -767,8 +768,8 @@ class ScrewExpert:
     def __init__(self, rig, S: Scene, mode, tcp0, yaw_start, fingers: dict):
         self.rig, self.S, self.P, self.mode = rig, S, S.P, mode
         self.bi = S.part
-        self.wi = rig.body_index("fr3/fr3_link7")
-        l7 = rig.ik.body_pose("fr3/fr3_link7")
+        self.wi = rig.body_index(HAND_BODY)
+        l7 = rig.ik.body_pose(HAND_BODY)
         self.tcp_in_l7 = rotm(l7).T @ (np.asarray(tcp0) - l7[:3])
         q_tcp = down_grasp_quat(yaw_start)
         self.R_tcp_in_l7 = rotm(l7).T @ rotm(np.r_[0.0, 0.0, 0.0, q_tcp])
@@ -1552,7 +1553,7 @@ def verdict(rig, S: Scene, ex: ScrewExpert, mode, paths, T: Task):
     rc["tcp_rise_after_release_mm"] = round(rise * 1000, 1)
     rc["min_rise_mm"] = 50.0
     q = np.asarray(qa.body_q)
-    li = qa.labels.index("fr3/fr3_link7")
+    li = qa.labels.index(HAND_BODY)
     tq = np.asarray(qa.t)
     wq = tq >= t_clear
     v_end = float(np.linalg.norm(np.diff(q[wq, li, :3], axis=0), axis=1).max() * rig.fps) if wq.sum() > 2 else 0.0
