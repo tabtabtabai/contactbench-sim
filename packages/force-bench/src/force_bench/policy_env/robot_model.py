@@ -4,8 +4,13 @@ Exported from the rig's IK model, which is the same URDF (``fr3_franka_hand.urdf
 the fixed links (link8, hand, hand_tcp) kept rather than collapsed into link7.  The chain runs from
 ``fr3/fr3_link0`` through the seven revolute joints, link8 and the hand to ``harness_mount``: a fixed frame on the
 hand whose x is the approach axis (hand z) and y the finger travel (hand y), the harness's mount convention
-(``closing_axis`` +Y).  ``gripper`` describes the Franka Hand for the harness's native-robot path (clockwork-5
-option A); keys fixed in STATUS-contactbench.md.
+(``closing_axis`` +Y).  The hand's origin is the flange (link8), turned -45 deg about its z, so the tip is at the
+flange.  ``gripper`` (nested, as the harness's native-robot path reads it, matrix PR #1769) describes the Franka Hand.
+
+Every number is measured from the model the sim runs: the joint limits are the URDF's (the sim enforces them, so a
+newer franka_description's wider q1/q6 limits would let a policy plan poses the sim refuses), the fingertip offset
+is the flange to the fingertip ENDS (the harness's "fingertip point", the midpoint between the fingertip ends), and
+the pad is the fingertip's contact box.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ def _pose_mat(row) -> np.ndarray:
     return _mat_of(row)
 
 
-def export(rig) -> dict:
+def export(rig, with_gripper: bool = True) -> dict:
     m = rig.ik.model
     labels = list(m.joint_label)
     body_labels = list(m.body_label)
@@ -68,33 +73,52 @@ def export(rig) -> dict:
     joints.append({"name": "harness_mount_axes",
                    "parent_frame": {"xyz": [0.0, 0.0, 0.0], "wxyz": _quat_of_matrix(MOUNT_IN_HAND)},
                    "child_frame": {"xyz": [0.0, 0.0, 0.0], "wxyz": [1.0, 0.0, 0.0, 0.0]}})
-    hand = _pose_mat(rig.ik.body_pose("fr3/fr3_hand"))
-    tcp = _pose_mat(rig.ik.body_pose("fr3/fr3_hand_tcp"))
-    offset = float((np.linalg.inv(hand) @ tcp)[2, 3])     # along the approach axis, hand origin -> pad centre
-    return {"schema": "matrix.robot-model.v1", "root": "fr3/fr3_link0", "tip": "harness_mount",
-            "asset": "newton franka_emika_panda fr3_franka_hand.urdf (ContactBench)",
-            "fingertip_offset_m": round(offset, 4), "closing_axis": 1, "joints": joints}
+    out = {"schema": "matrix.robot-model.v1", "root": "fr3/fr3_link0", "tip": "harness_mount",
+           "asset": "newton franka_emika_panda fr3_franka_hand.urdf (ContactBench)", "asset_sha256": _urdf_sha256(),
+           "fingertip_offset_m": round(fingertip_offset(rig), 4), "closing_axis": 1, "joints": joints}
+    if with_gripper:
+        out["gripper"] = gripper(rig)
+    return out
+
+
+def _urdf_sha256() -> str:
+    import hashlib
+
+    import newton
+    urdf = newton.utils.download_asset("franka_emika_panda") / "urdf/fr3_franka_hand.urdf"
+    return hashlib.sha256(urdf.read_bytes()).hexdigest()
+
+
+def _pad_box(rig):
+    """The left fingertip's contact box (the box reaching furthest along the fingers): (centre, half extents) in the
+    finger's frame."""
+    import newton
+    m = rig.model
+    bi = rig.body_index("fr3/fr3_leftfinger")
+    sb, st = m.shape_body.numpy(), m.shape_type.numpy()
+    sc, X = m.shape_scale.numpy(), m.shape_transform.numpy()
+    boxes = [s for s in np.flatnonzero(sb == bi) if int(st[s]) == int(newton.GeoType.BOX)]
+    if not boxes:
+        raise ValueError("no fingertip box on fr3_leftfinger")
+    s = max(boxes, key=lambda k: float(X[k][2] + sc[k][2]))
+    return np.asarray(X[s][:3], float), np.asarray(sc[s], float)
+
+
+def fingertip_offset(rig) -> float:
+    """Flange (= hand origin) to the fingertip ends, along the approach axis."""
+    flange = _pose_mat(rig.ik.body_pose("fr3/fr3_link8"))
+    finger = _pose_mat(rig.ik.body_pose("fr3/fr3_leftfinger"))
+    c, h = _pad_box(rig)
+    return float((np.linalg.inv(flange) @ finger)[2, 3] + c[2] + h[2])
+
 
 
 def gripper(rig) -> dict:
-    """The Franka Hand for the harness's native path: a parallel prismatic hand, 0..0.08 m between the pads."""
-    pad = pad_size(rig)
-    return {"type": "parallel-prismatic", "max_gap_m": 2 * FINGER_MAX_M, "pad_size_m": pad,
-            "command": "gripper 0 = open (0.08 m), 1 = closed; each finger target = 0.04 * (1 - g)"}
-
-
-def pad_size(rig) -> list:
-    """Contact extent of one fingertip (length along the approach axis, width across), from the finger's collision
-    shapes in the sim model."""
-    m = rig.model
-    bi = rig.body_index("fr3/fr3_leftfinger")
-    sb = m.shape_body.numpy()
-    scale = m.shape_scale.numpy()
-    sizes = [2 * np.asarray(scale[s], float) for s in np.flatnonzero(sb == bi)]
-    if not sizes:
-        return [0.0, 0.0]
-    s = max(sizes, key=lambda v: float(np.prod(v[v > 0])) if (v > 0).any() else 0.0)
-    return [round(float(s[2]), 4), round(float(s[0]), 4)]
+    """The Franka Hand for the harness's native path: parallel prismatic, 0..0.08 m between the pads, closing along
+    the mount's +Y.  pad_size_m = [length along the fingers, width] of the fingertip's contact box."""
+    _, h = _pad_box(rig)
+    return {"type": "parallel-prismatic", "max_gap_m": 2 * FINGER_MAX_M,
+            "pad_size_m": [round(float(2 * h[2]), 4), round(float(2 * h[0]), 4)], "closing_axis": "Y"}
 
 
 def gripper_of(q_fingers) -> float:
