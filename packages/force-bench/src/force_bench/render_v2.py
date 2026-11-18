@@ -68,7 +68,7 @@ def enabled() -> bool:
 # (label regex, material); the first match wins.  Labels are the model's shape labels (``force-bench`` kit parts are
 # "kit/<asset>/<part>"); unmatched shapes keep their color.
 MATERIALS = [
-    (r"^ground_plane$", "floor_tile"),
+    (r"^render_v2/floor$", "floor_tile"),
     (r"^table$", "walnut"),
     (r"^render_v2/wall", "plaster"),
     (r"^kit/door/door(_frame_\d)?$", "oak"),
@@ -96,7 +96,7 @@ SPEC = {
     "brass": ((0.80, 0.63, 0.32), "brushed", 18.0),
     "satin_steel": ((0.72, 0.73, 0.75), "brushed", 18.0),
     "dark_steel": ((0.38, 0.39, 0.41), "brushed", 22.0),
-    "zinc": ((0.78, 0.79, 0.82), "brushed", 30.0),
+    "zinc": ((0.58, 0.60, 0.63), "brushed", 30.0),
     "opal_glass": ((0.95, 0.94, 0.91), "opal", 14.0),
     "bakelite": ((0.13, 0.12, 0.11), "plaster", 20.0),
     "anodised_black": ((0.16, 0.17, 0.19), "brushed", 25.0),
@@ -225,14 +225,25 @@ def smooth_normals(model) -> None:
 
 # ── the backdrop ─────────────────────────────────────────────────────────────────────────────────────────────────
 def add_backdrop(rig) -> None:
-    """Three visual-only plaster walls well behind the scene (appended last; no collision, no mass)."""
+    """A tiled floor and three plaster walls, visual only (appended last; no collision, no mass).
+
+    Every scene's table is a 1 cm box whose top is exactly at the ground plane (z = 0), so the two z-fight and the
+    winner varies by scene and view.  Version 2 hides the ground plane from the renderer only (its VISIBLE flag; it
+    keeps colliding) and draws a visual-only floor slab 2 mm below z = 0: hidden under the table, the floor beyond
+    it."""
     if not enabled():
         return
     import newton
     b = rig.builder
+    visible = int(newton.ShapeFlags.VISIBLE)
+    for i, lbl in enumerate(b.shape_label):
+        if str(lbl) == "ground_plane":
+            b.shape_flags[i] = int(b.shape_flags[i]) & ~visible
     cfg = newton.ModelBuilder.ShapeConfig()
     cfg.has_shape_collision = False
     cfg.has_particle_collision = False
+    b.add_shape_box(body=-1, xform=wp.transform(wp.vec3(0.0, 0.2, -0.002 - 0.01), wp.quat_identity()),
+                    hx=2.4, hy=2.4, hz=0.01, cfg=cfg, label="render_v2/floor")
     half_t, h = 0.02, 0.9
     for label, p, hx, hy in (("render_v2/wall_back", (0.0, 1.6, h), 2.4, half_t),
                              ("render_v2/wall_left", (-1.8, 0.2, h), half_t, 1.6),
