@@ -34,3 +34,10 @@ Judge phase (policy runs): the policy's part ends once it has let go for good, m
 TCP 25 mm further from the bulb than where it held it, or when the budget runs out. The env then runs the row's own
 ending sequence with the arm holding its last targets: still for 0.8 s, then the probe loosen-way for 1 s, then
 tighten-way for 1 s. The expert runs its identical sequence itself.
+
+## Seeded starts
+
+- **5.1:** `--seed N` translates the door within the paper's 0.15 × 0.15 m square (±75 mm in x and y), with no yaw.
+  Upstream's `Hinge` and `door_angle` take the hinge along world +y, so a yawed door needs both rewritten and the
+  expert re-verified. Yaw (±15°, clockwork-5 D3) is a follow-up. Seeded and nominal runs are reported separately.
+- **5.2:** upstream's own `--seed`: the socket moves within the same square, with no yaw (the socket is round).
