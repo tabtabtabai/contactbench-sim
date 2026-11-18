@@ -30,7 +30,7 @@ import force_bench.appendix_tasks._kit_thread as kt
 from force_bench.appendix_tasks.common import RobotContactProbe, appendix_rig, sample_start
 from force_bench.g1.robot import (DEX1_HALF_GAP0, PREFIX, ContactPeak, G1IK, TorqueMonitor, add_g1, apply_look,
                                   camera_mounts, cap_headroom, effective_arm_caps, floor_and_table,
-                                  gravity_torques, init_pose)
+                                  gravity_torques, init_pose, sim_cap_readback)
 from force_bench.robot.franka import down_grasp_quat
 
 NAME = "install_light_bulb_g1"
@@ -161,6 +161,7 @@ def setup(a, name):
     shift = np.r_[S.axis_xy - kt.AXIS_XY, 0.0]
     rig.finalize(probes=[P.kind], cam_pos=cam_pos + shift, cam_target=cam_tgt + shift)
     rig.solver = kt.make_solver(rig.model, iterations=kt.ITERS, impratio=kt.IMPRATIO)
+    rig.arm_caps_sim = sim_cap_readback(rig.solver, g1, rig.effort_budget, tag=f"[{NAME}]")
     sc = rig.model.shape_color.numpy()
     for lbl, col in kt.VIS_COL.items():
         for sid in rig.shapes.get(lbl, []):

@@ -41,7 +41,7 @@ from force_bench.appendix_tasks._door_kit import (LOCK_PROBE_NM, LOCK_PROBE_S, H
 from force_bench.appendix_tasks.common import StopRun, appendix_rig
 from force_bench.g1.robot import (ContactPeak, SumProbe, add_g1, apply_look, camera_mounts, cap_headroom,
                                   effective_arm_caps, floor_and_table, init_pose, q_indices,
-                                  TorqueMonitor)
+                                  sim_cap_readback, TorqueMonitor)
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver
 
@@ -129,6 +129,7 @@ def main(argv=None):
     rig.camera_mounts = camera_mounts(a.model, side)
     apply_look(rig.model, g1)                    # the G1's own colours, after the recorder's palette (finalize)
     rig.solver = make_solver(rig.model, iterations=24, **{**rig.solver_options, "impratio": IMPRATIO})
+    rig.arm_caps_sim = sim_cap_readback(rig.solver, g1, rig.effort_budget)   # what the simulator clamps to
     probe = HingeProbe(rig, h)
     jq = joint_reader(rig, h)
     qi = q_indices(rig.model, g1["joints"])

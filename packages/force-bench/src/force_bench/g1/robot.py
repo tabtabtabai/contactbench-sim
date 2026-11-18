@@ -535,3 +535,47 @@ def effective_arm_caps(model: newton.Model, g1: dict) -> dict:
             raise SystemExit(f"refusing to run: {jn} effort range {v} (the G1 limit is {cap} N.m)")
         out[jn] = {"limit_Nm": cap, "actuator_cap_Nm": round(v, 3)}
     return out
+
+
+def sim_cap_readback(solver, g1: dict, budget: dict | None = None, tag: str = "[g1]") -> dict:
+    """Each arm joint's actuator force range as the SIMULATOR holds it: MuJoCo's jnt_actfrcrange (the clamp on the
+    joint's total actuator force, which newton sets from joint_effort_limit) read from the compiled mj_model and, when
+    present, from the GPU mjw_model the step uses.  Logs one line per joint; raises if any range is missing, zero or
+    unbounded, or wider than the G1's limit."""
+    import mujoco
+    s = solver
+    for _ in range(4):                                # unwrap probes / wrappers to the SolverMuJoCo
+        if hasattr(s, "mj_model"):
+            break
+        s = getattr(s, "solver", None) or getattr(s, "inner", None) or getattr(s, "_solver", None)
+        if s is None:
+            raise SystemExit("refusing to run: no MuJoCo model to read the arm's force ranges from")
+    mjm = s.mj_model
+    gpu = None
+    mjw = getattr(s, "mjw_model", None)
+    if mjw is not None and hasattr(mjw, "jnt_actfrcrange"):
+        gpu = mjw.jnt_actfrcrange.numpy().reshape(-1, mjm.njnt, 2)[0] if mjw.jnt_actfrcrange.numpy().ndim == 3 \
+            else mjw.jnt_actfrcrange.numpy()
+    names = [mujoco.mj_id2name(mjm, mujoco.mjtObj.mjOBJ_JOINT, i) or "" for i in range(mjm.njnt)]
+    out = {}
+    for jn in g1["joints"]:
+        cap = arm_cap(jn)
+        if cap is None:
+            continue
+        hits = [i for i, n in enumerate(names) if n == jn or n.endswith("/" + jn) or n.endswith(jn)]
+        if len(hits) != 1:
+            raise SystemExit(f"refusing to run: {jn} not found once in the MuJoCo model ({len(hits)} matches)")
+        i = hits[0]
+        lo, hi = (float(v) for v in mjm.jnt_actfrcrange[i])
+        limited = bool(mjm.jnt_actfrclimited[i])
+        g_lo, g_hi = (float(v) for v in gpu[i]) if gpu is not None else (lo, hi)
+        if not limited or not (0.0 < hi < 1e4) or abs(lo + hi) > 1e-6 or hi > cap + 1e-6 or abs(g_hi - hi) > 1e-6:
+            raise SystemExit(f"refusing to run: {jn} actuator force range limited={limited} [{lo}, {hi}] "
+                             f"(gpu [{g_lo}, {g_hi}]), G1 limit {cap} N.m")
+        ff = (budget or {}).get(jn, {}).get("ff_max_Nm")
+        print(f"{tag} cap readback {jn}: forcerange [{lo:.3f}, {hi:.3f}] N.m (mujoco jnt_actfrcrange"
+              f"{', gpu ' + format(g_hi, '.3f') if gpu is not None else ''}; URDF limit {cap:g}, ff headroom "
+              f"{(cap - hi):.3f}{'' if ff is None else f', planned ff peak {ff:.3f}'})", flush=True)
+        out[jn] = {"forcerange_Nm": [round(lo, 4), round(hi, 4)], "gpu_forcerange_Nm": [round(g_lo, 4), round(g_hi, 4)]
+                   if gpu is not None else None, "limit_Nm": cap, "source": "mujoco jnt_actfrcrange (compiled model)"}
+    return out
