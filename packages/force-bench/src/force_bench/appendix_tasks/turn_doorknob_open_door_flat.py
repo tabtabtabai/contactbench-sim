@@ -37,7 +37,7 @@ import warp as wp
 from force_bench.appendix_tasks._door_kit import (
     CAM_POS, CAM_TARGET, LOCK_PROBE_NM, LOCK_PROBE_S, Hinge, HingeProbe, arm_filter, build_door, door_angle,
     door_penetration, down_quat, drawn_shapes, fingers_filter, joint_reader, lock_probe_check, make_rig, pads_check,
-    smooth)
+    smooth, door_pose)
 from force_bench.appendix_tasks.common import save_appendix_verdict
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver, set_finger_effort_limit
@@ -72,6 +72,8 @@ def parse(argv=None):
     ap.add_argument("--unlock", choices=["40", "48", "60", "72", "80"], default="60")
     ap.add_argument("--spring", choices=["5", "7.5", "10"], default="5")
     ap.add_argument("--name", default=None, help="output folder name")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="random start: the door translated within the paper's 0.15 x 0.15 m square (no yaw)")
     return ap.parse_args(argv)
 
 
@@ -84,7 +86,8 @@ def main(argv=None):
     for d in (7, 8):
         rig.builder.joint_target_ke[d] = MJ_FINGER_KE
     set_finger_effort_limit(rig.builder, MJ_FINGER_F_MAX)
-    h = build_door(rig, knob=choice, lock="90°", lock_params={"hold_retracted": True})   # deadbolt parked
+    pose, shift = door_pose(a.seed)
+    h = build_door(rig, knob=choice, lock="90°", lock_params={"hold_retracted": True}, pose=pose)   # deadbolt parked
     hk = h._modules["doorknob-module"]
     knob, leaf = h.bodies["knob"], h.bodies["leaf"]
     axis_xy = np.asarray(hk.info["spindle_point_world"])[:2]
@@ -103,7 +106,8 @@ def main(argv=None):
     rig.hard_joint_limits = True
     rig.limit_dampratio = 0.5
     rig.finalize(probes=[f"{hk.label}/latch", f"{hk.label}/knob", "door/leaf",
-                         "fr3/fr3_leftfinger", "fr3/fr3_rightfinger"], cam_pos=CAM_POS, cam_target=CAM_TARGET)
+                         "fr3/fr3_leftfinger", "fr3/fr3_rightfinger"], cam_pos=CAM_POS + shift,
+                 cam_target=CAM_TARGET + shift)
     rig.solver = make_solver(rig.model, iterations=24, **{**rig.solver_options, "impratio": IMPRATIO})
     probe = HingeProbe(rig, h)
     hinge = Hinge(h)
@@ -195,6 +199,8 @@ def main(argv=None):
         "tcp_drift_last_1s_mm": round(drift, 2), "door_range_last_1s_deg": round(dd, 3),
         "note": "ends like the reference videos: hand on the knob, door held open, arm still (a flat door released "
                 "at 45 deg falls shut)"}
+    crit["start"] = {"pass": True, "info_only": True, "seed": a.seed,
+                     "door_shift_mm": [round(float(v) * 1e3, 1) for v in shift[:2]]}
     for k, v in crit.items():
         qa.report["checks"][k] = v
         qa.report["pass"] &= bool(v["pass"])

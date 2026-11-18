@@ -200,6 +200,7 @@ SEEDED: set[str] = {
     "stack_cups",                       # the three cups each in the 0.15 x 0.15 m square, no overlap
     "plug_in_usb",                      # the slot in the paper's 0.15 x 0.15 m square, yaw within +-20 deg
     "turn_dial_to_target",              # the dial in the paper's 0.15 x 0.15 m square, yaw within +-15 deg
+    "turn_doorknob_open_door_flat",     # the door in the paper's 0.15 x 0.15 m square, no yaw (clockwork-5 fork)
     "install_light_bulb",               # the socket in the paper's 0.15 x 0.15 m square (round: no yaw)
     "put_bottle_cap_onto_bottle",       # the bottle in the paper's 0.15 x 0.15 m square (round: no yaw)
 }

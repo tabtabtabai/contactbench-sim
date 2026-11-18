@@ -24,7 +24,7 @@ import numpy as np
 import trimesh
 import warp as wp
 
-from force_bench.appendix_tasks.common import appendix_rig
+from force_bench.appendix_tasks.common import Placement, appendix_rig, sample_start
 from force_bench.kit import add_asset, load_kit
 from force_bench.kit.build import pose_matrix
 
@@ -50,16 +50,29 @@ def make_rig(name: str):
     return rig
 
 
+# seeded start (clockwork-5 fork): the door frame translated in the paper's 0.15 x 0.15 m square.  No yaw: Hinge
+# and door_angle take the hinge along world +y, so a yawed door would need both rewritten.
+DOOR_PLACE = Placement(xy=(float(DOOR_C[0]), float(DOOR_C[1])), dxy=0.075)
+
+
+def door_pose(seed: int | None) -> np.ndarray:
+    """DOOR_POSE, or a seeded translation of it (``--seed N``); returns (pose, xy shift)."""
+    x, y, _ = sample_start({"door": DOOR_PLACE}, seed)["door"]
+    pose = DOOR_POSE.copy()
+    pose[0, 3], pose[1, 3] = x, y
+    return pose, np.array([x - DOOR_C[0], y - DOOR_C[1], 0.0])
+
+
 def build_door(rig, knob: dict | str | None = None, lock: str | dict | None = None, key_mode: str | None = None,
-               knob_params: dict | None = None, lock_params: dict | None = None):
-    """Table + the kit door (both modules) at DOOR_POSE; returns the door's AssetHandle."""
+               knob_params: dict | None = None, lock_params: dict | None = None, pose: np.ndarray | None = None):
+    """Table + the kit door (both modules) at DOOR_POSE (or ``pose``); returns the door's AssetHandle."""
     rig.table(center_xy=TABLE_C, half=TABLE_HALF)
     mods = {}
     if knob is not None:
         mods["doorknob-module"] = knob
     if lock is not None:
         mods["lock-module"] = lock
-    h = add_asset(rig, "door", pose=DOOR_POSE, modules=mods, key_mode=key_mode,
+    h = add_asset(rig, "door", pose=DOOR_POSE if pose is None else pose, modules=mods, key_mode=key_mode,
                   knob=knob_params, lock=lock_params)
     return h
 
