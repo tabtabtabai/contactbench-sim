@@ -36,6 +36,7 @@ from force_bench.rig import make_solver
 NAME = "turn_doorknob_open_door_flat_g1"
 FINGER_OPEN, FINGER_CLOSE = -0.02, 0.0          # Dex1 finger joints: -0.02 = 83 mm open; 0.0 = 43 mm (< the knob)
 IMPRATIO = 10.0
+PRE_HOLD = 0.6                                  # s at the pre-grasp before descending (covers the lock probe)
 CAM_POS, CAM_TARGET = np.array([0.55, -0.55, 0.55]), np.array([-0.08, 0.20, 0.05])
 
 
@@ -80,7 +81,12 @@ def main(argv=None):
     fingers = [f"{side}_dex1_finger_joint_1", f"{side}_dex1_finger_joint_2"]
     starts = rig.model.joint_target_q_start.numpy() if hasattr(rig.model, "joint_target_q_start") else None
     tq_index = {n: (int(starts[g1["joints"][n]]) if starts is not None else qi[n]) for n in [*arm_names, *fingers]}
-    way = traj["waypoints"]
+    # start AT the pre-grasp (8 cm above the knob), not the arm's home pose: with the waist lean the home pose puts
+    # the finger boxes inside the door, and the start contact kicks the knob and flings the leaf.  Hold there while
+    # the hidden lock probe runs (0.05-0.45 s), with the robot still.
+    way = traj["waypoints"][1:]
+    t0 = way[0][0]
+    way = [(0.0, way[0][1], way[0][2])] + [(w[0] - t0 + PRE_HOLD, w[1], w[2]) for w in way]
     ts = np.array([w[0] for w in way])
     Q = np.array([w[1] for w in way])
     modes = [w[2] for w in way]
