@@ -644,8 +644,150 @@ class DialAdapter(Adapter):
                 "t_end_s": round(float(t[-1]), 3), "final_error_deg": round(err, 2)}
 
 
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 5.7  screw_nut_onto_screw (nut in the pinch, 0.6 turn caught on the bolt's first thread)
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+class NutAdapter(Adapter):
+    """The row's log (t, nut z, robot contact, left pad, right pad) is the world-state log; the expert's plan, stroke
+    windows and t_plan are never read by the judge."""
+    name = "nut"
+    CLEAR_S = 0.4
+    AWAY_M = 0.025
+    DESCEND = 0.05e-3          # m/s: the nut is screwing down (helix descent) faster than this
+
+    def __init__(self, ep):
+        super().__init__(ep)
+        import force_bench.appendix_tasks.screw_nut_onto_screw as sn
+        from force_bench.appendix_tasks.common import CONTACT_FREE_N
+        from force_bench.tasks.nut_bolt import LEAD
+        self.sn, self.lead = sn, float(LEAD)
+        x = closure(ep.extra_cb)
+        self.log, self.ni = x["log"], int(x["ni"])
+        self.free_n = CONTACT_FREE_N
+        self.fl, self.fr = self.rig.body_index("fr3/fr3_leftfinger"), self.rig.body_index("fr3/fr3_rightfinger")
+        self.min_z = float(sn.Z_START)
+        self.clear_since = None
+        self.d0 = None
+        self.t_judge = None
+
+    def _tips(self):
+        bq = self.rig.s0.body_q.numpy()
+        return 0.5 * (bq[self.fl, :3] + bq[self.fr, :3]), bq[self.ni, :3]
+
+    def turns(self, z=None):
+        return (float(self.sn.Z_START) - (self.min_z if z is None else z)) / self.lead
+
+    def engagement_mm(self, z):
+        """How much of the nut's height is below the bolt's thread top (7.02 mm = fully engaged)."""
+        sn = self.sn
+        return float(np.clip(sn.THREAD_TOP - (z - sn.NUT_H / 2), 0.0, sn.NUT_H) * 1e3)
+
+    def monitor(self, t):
+        super().monitor(t)
+        if self.ep.done or not self.log or self.t_judge is not None:
+            return
+        _, z, rc, fl, fr = self.log[-1]
+        self._force(t, rc)
+        self._grip_update(t, min(fl, fr) > 1.0)
+        tips, nut = self._tips()
+        if np.hypot(nut[0], nut[1]) > 0.010 or z > float(self.sn.Z_START) + 0.008 or z < -0.02:
+            self.ep.ev.fatal(t, "part_dropped", nut_xy_mm=[round(float(v) * 1e3, 1) for v in nut[:2]],
+                             nut_z_mm=round(float(z) * 1e3, 2))
+            self.ep.end("irreversible")
+            return
+        if z < self.min_z - self.lead * 10.0 / 360:
+            self._redo(t, "progress")
+        if z > self.min_z + self.lead * BACKOUT_DEG / 360:
+            self._set_back(t, "back_out", turns=round(self.turns(z), 3), best_turns=round(self.turns(), 3))
+            self.min_z = z
+        self.min_z = min(self.min_z, z)
+        if not self.ep.expert_driven:
+            d = float(np.linalg.norm(tips - nut))
+            self.d0 = d if self.d0 is None else self.d0
+            if rc < self.free_n and d > self.d0 + self.AWAY_M:
+                self.clear_since = t if self.clear_since is None else self.clear_since
+            else:
+                self.clear_since = None
+        self.success_online = z <= self.sn.ENGAGED_Z and self.clear_since is not None
+
+    def check_end(self):
+        if self.clear_since is not None and self.ep.t - self.clear_since >= self.CLEAR_S:
+            self.ep.end("released" if self.log[-1][1] <= self.sn.ENGAGED_Z else "released_untight")
+
+    def judge_phase(self):
+        """The row's ending after the hand has gone: still for T_STILL, arm holding its last targets."""
+        ep = self.ep
+        if ep.expert_driven or ep.ev.irreversible:
+            return
+        ep.done = False
+        self.t_judge = ep.t
+        for _ in range(int(round(self.sn.T_STILL * ep.fps))):
+            ep.step(None)
+        ep.done = True
+
+    def upstream_ok(self) -> bool:
+        return self.ep.expert_driven          # the row's verdict is laid out on the expert's plan (t_plan, strokes)
+
+    def progress(self):
+        span = float(self.sn.Z_START - self.sn.ENGAGED_Z)
+        return round(float(np.clip((self.sn.Z_START - self.min_z) / span, 0.0, 1.0)), 3)
+
+    def status_line(self):
+        if not self.log:
+            return ""
+        _, z, rc, fl, fr = self.log[-1]
+        return (f"nut_z={z * 1e3:6.2f}mm turns={self.turns(z):+.2f} engaged={self.engagement_mm(z):.2f}mm "
+                f"pads={fl:.1f}/{fr:.1f}N robot={rc:.2f}N")
+
+    def judge(self) -> dict:
+        sn = self.sn
+        L = np.array(self.log)
+        t, z, rc, fl, fr = (L[:, k] for k in range(5))
+        crit = {}
+        g0 = t < sn.T_GRIP0 + 0.3
+        crit["held_in_hand_at_start"] = {
+            "pass": bool(min(fl[g0].max(), fr[g0].max()) > 1.0 and abs(z[g0].min() - sn.Z_START) < 0.001),
+            "pad_peak_N": [round(float(fl[g0].max()), 2), round(float(fr[g0].max()), 2)], "upstream": "identical"}
+        turns = (sn.Z_START - float(z.min())) / self.lead
+        crit["threads_fully_engaged"] = {
+            "pass": bool(float(z[-1]) <= sn.ENGAGED_Z), "final_nut_centre_mm": round(float(z[-1]) * 1e3, 2),
+            "engaged_when_centre_below_mm": round(sn.ENGAGED_Z * 1e3, 2), "turns_screwed": round(turns, 2),
+            "engagement_depth_mm": round(self.engagement_mm(float(z[-1])), 2),
+            "nut_height_mm": round(sn.NUT_H * 1e3, 2), "upstream": "identical"}
+        touch = np.flatnonzero(rc >= self.free_n)
+        i_rel = int(touch[-1]) if len(touch) else 0
+        t_rel = float(t[i_rel])
+        before = (t >= t_rel - 0.3) & (t <= t_rel)
+        z_rel = float(np.median(z[before])) if before.any() else float(z[i_rel])
+        crit["nut_stays_put_after_release"] = {
+            "pass": bool(abs(float(z[-1]) - z_rel) < 0.0003), "z_before_release_mm": round(z_rel * 1e3, 3),
+            "final_z_mm": round(float(z[-1]) * 1e3, 3),
+            "upstream": "identical threshold; the release is the last robot-nut contact (upstream: the end of the "
+                        "expert's plan)"}
+        dz = np.gradient(z, t) if len(t) > 2 else np.zeros_like(t)
+        screwing = (dz < -self.DESCEND) & (rc >= self.free_n)
+        crit["real_finger_grasp"] = {
+            "pass": bool(screwing.any() and fl[screwing].mean() > 1.0 and fr[screwing].mean() > 1.0),
+            "mean_pad_N_while_screwing": [round(float(fl[screwing].mean()), 2), round(float(fr[screwing].mean()), 2)]
+            if screwing.any() else None,
+            "upstream": "upstream averages over the expert's strokes; here over every frame the nut screws down "
+                        "with the hand on it"}
+        t_still = self.t_judge if self.t_judge is not None else float(t[-1]) - sn.T_STILL
+        still = t >= t_still - 1e-9
+        peak = float(rc[still].max()) if still.any() else float("inf")
+        crit["released_and_clear"] = {"pass": bool(still.any() and peak < self.free_n),
+                                      "robot_object_contact_peak_N": round(peak, 4),
+                                      "window_s": [round(t_still, 2), round(float(t[-1]), 2)],
+                                      "upstream": "identical threshold; window = the still phase"}
+        finite = bool(np.isfinite(L).all())
+        return {"pass": bool(all(v["pass"] for v in crit.values()) and finite), "criteria": crit, "finite": finite,
+                "t_end_s": round(float(t[-1]), 3), "turns": round(turns, 2),
+                "engagement_depth_mm": round(self.engagement_mm(float(z[-1])), 2)}
+
+
 ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "turn_door_handle_open_door_flat": DoorAdapter,
-            "install_light_bulb": BulbAdapter, "turn_dial_to_target": DialAdapter}
+            "install_light_bulb": BulbAdapter, "turn_dial_to_target": DialAdapter,
+            "screw_nut_onto_screw": NutAdapter}
 
 
 def adapter_for(module: str):
