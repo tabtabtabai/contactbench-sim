@@ -200,7 +200,7 @@ class ContactPeak:
     ``force`` is that frame's strongest robot pair)."""
 
     LOG_N = 50.0
-    MAX_LOG = 300
+    MAX_LOG = 10 ** 6           # every frame above LOG_N (the 300-frame cap truncated a 40 s handle episode)
 
     def __init__(self, model, prefix: str = PREFIX):
         self.shape_labels = [str(x or "") for x in model.shape_label]
