@@ -63,28 +63,36 @@ def parse(argv=None):
     return ap.parse_args(argv)
 
 
+FIT_TOL = (0.002, math.radians(2.0))  # the turn's IK error allowed (the expert's xy servo trims a few mm)
+
+
 def turn_fit(ik, axis, z, yaw0, gravity_joints):
     """The grasp yaw for the dial's turn: for the bar's yaw and its 180-deg twin (+ 2 pi k, kept within +-pi of 0),
-    walk the top-down IK from the turn's top (a + TURN_NEED + MARGIN) down to its start (a - MARGIN) in 5-deg steps
-    at the grasp height.  Returns (a, q at a, the largest |gravity torque| per arm joint over the walk) or None."""
-    from force_bench.appendix_tasks.install_light_bulb_g1 import IK_TOL
+    walk the top-down IK over the turn plus MARGIN at both ends (5-deg steps at the grasp height), from the top down
+    and from the bottom up, each warm-started from the reset pose.  Returns (a, q at a, the largest |gravity torque|
+    per arm joint over the walk) or None."""
     q_home = ik.joint_q.numpy().copy()
     p = np.array([axis[0], axis[1], z])
     for base in (yaw0, yaw0 + math.pi):
         a = math.remainder(base, 2 * math.pi)
-        ys = np.arange(a + TURN_NEED + MARGIN, a - MARGIN - 1e-9, -math.radians(5.0))
-        ik.joint_q.assign(q_home)
-        ik.solve(p, down_grasp_quat(ys[0]), iterations=96)
-        gmax, ok = np.zeros(len(ik.arm)), True
-        for y in ys:
-            ik.solve(p, down_grasp_quat(y), iterations=24)
-            if max(e / tol for e, tol in zip(ik.residual(p, down_grasp_quat(y)), IK_TOL)) > 1.0:
-                ok = False
-                break
-            gmax = np.maximum(gmax, np.abs(gravity_torques(ik.model, ik._state().body_q.numpy(), gravity_joints)))
-        if ok:
-            ik.solve(p, down_grasp_quat(a), iterations=48)
-            return a, ik.joint_q.numpy().copy(), gmax
+        down = np.arange(a + TURN_NEED + MARGIN, a - MARGIN - 1e-9, -math.radians(5.0))
+        for ys in (down, down[::-1]):
+            ik.joint_q.assign(q_home)
+            for _ in range(3):
+                ik.solve(p, down_grasp_quat(ys[0]), iterations=64)
+            gmax, ok, q_a = np.zeros(len(ik.arm)), True, None
+            for y in ys:
+                ik.solve(p, down_grasp_quat(y), iterations=32)
+                if max(e / tol for e, tol in zip(ik.residual(p, down_grasp_quat(y)), FIT_TOL)) > 1.0:
+                    ok = False
+                    break
+                gmax = np.maximum(gmax, np.abs(gravity_torques(ik.model, ik._state().body_q.numpy(), gravity_joints)))
+                if abs(y - a) < 1e-6 or (q_a is None and y <= a + 1e-9 and ys is down):
+                    q_a = ik.joint_q.numpy().copy()
+            if ok:
+                ik.joint_q.assign(q_a if q_a is not None else ik.joint_q.numpy())
+                ik.solve(p, down_grasp_quat(a), iterations=48)
+                return a, ik.joint_q.numpy().copy(), gmax
     return None
 
 
@@ -149,7 +157,8 @@ def main(argv=None):
     miss = None
     if fit is None:
         LAST_MISS.update(dial_xy_m=[round(float(v), 4) for v in axis], dial_yaw_deg=round(math.degrees(yaw0), 1),
-                         needed_deg=round(math.degrees(TURN_NEED + 2 * MARGIN), 1))
+                         needed_deg=round(math.degrees(TURN_NEED + 2 * MARGIN), 1), arm=SIDE,
+                         ik_tolerance=[FIT_TOL[0], round(math.degrees(FIT_TOL[1]), 1)])
         miss = SystemExit(f"{NAME}: no top-down wrist window reaches the dial's turn: neither from the bar's yaw "
                           f"({math.degrees(yaw0):+.1f}) nor its 180-deg twin does the IK follow a "
                           f"{math.degrees(TURN_NEED + 2 * MARGIN):.0f} deg top-down turn at the grip")
