@@ -624,6 +624,7 @@ class TorqueMonitor:
         raw = self.ke * (qt - q) - self.kd * qd
         act = np.clip(raw, -self.cap, self.cap)
         tot = np.abs(act + ff)
+        self.last = {"torque_Nm": tot, "frac": tot / self.limit, "at_cap": np.abs(raw) >= self.cap - 1e-9}
         at = (np.abs(raw) >= self.cap - 1e-9)
         self.sat += at.astype(int)
         if at.any():                                   # where in the episode an actuator sits at its cap

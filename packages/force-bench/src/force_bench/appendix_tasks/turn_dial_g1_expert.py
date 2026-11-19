@@ -146,6 +146,22 @@ class G1DialExpert(T.Expert):
         self.rig.solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
 
     diag = None                       # G1_DIAG_TRACE=1: per frame the jaw state against the bar (for diagnosis)
+    diag_hand = None
+
+    def _diag_arm(self, state):
+        """The arm's joint torques this frame (TorqueMonitor's estimate) and the hand's velocity."""
+        tm = self.rig.torque_monitor
+        last = getattr(tm, "last", None)
+        out = {}
+        if last is not None:
+            out["arm_torque_Nm"] = {n.replace("_joint", ""): round(float(v), 3) for n, v in zip(tm.names, last["torque_Nm"])}
+            out["arm_torque_frac_max"] = round(float(np.max(last["frac"])), 4)
+            out["arm_at_cap"] = [n for n, c in zip(tm.names, last["at_cap"]) if c]
+        if self.diag_hand is not None:
+            qd = state.body_qd.numpy()[self.diag_hand].astype(float)     # Newton: (linear, angular)
+            out["hand_lin_vel_mm_s"] = [round(1e3 * float(v), 2) for v in qd[:3]]
+            out["hand_ang_vel_rad_s"] = [round(float(v), 4) for v in qd[3:6]]
+        return out
 
     def extra(self, state, t):
         self.rig.torque_monitor.sample(state, self.rig.control, t, self.st["phase"])
@@ -166,7 +182,8 @@ class G1DialExpert(T.Expert):
                               "effort_cap_N": round(float(self._squeeze or 0.0), 2),
                               "axis_off_jaw_centre_mm": round(1e3 * off, 3),
                               "jaw_centre_xy_from_axis_mm": [round(1e3 * float(c[i] - self.axis[i]), 3) for i in (0, 1)],
-                              "tip_gap_mm": round(1e3 * float(np.linalg.norm(p2 - p1)), 3), **lk})
+                              "tip_gap_mm": round(1e3 * float(np.linalg.norm(p2 - p1)), 3), **lk,
+                              **self._diag_arm(state)})
         return super().extra(state, t)
 
 
@@ -569,6 +586,7 @@ def main(argv=None):
         ex.diag = []
         ex.diag_q = [int(qs_b[g1["joints"][n]]) for n in fingers]
         ex.diag_qt = list(fin_t)
+        ex.diag_hand = g1["bodies"][f"{SIDE}_hand_base_link"]
         rig.finger_params = finger_readback(rig.solver, rig.model, g1, SIDE, overdrive_m=1.25 * T.SQUEEZE[KNOB] / kp_f)
         ex.setup_strokes(ys_b, ok_b, yaw0, first)
         rig.variant_extra.update(
