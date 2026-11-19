@@ -38,7 +38,7 @@ FORCE_LIMIT_FRAMES = int(os.environ.get("TB_FORCE_LIMIT_FRAMES", "4"))
 
 
 def force_limit_rule() -> str:
-    return (f"per-finger contact force (the sum of contact magnitudes on each finger body's shapes, contract #1773) > {FORCE_LIMIT_N:g} N for "
+    return (f"per-finger contact force (normal-magnitude-sum: the sum of each contact's normal-force magnitude on the finger body's shapes, contract #1773, 19 Nov) > {FORCE_LIMIT_N:g} N for "
             f"{FORCE_LIMIT_FRAMES} consecutive frame(s) at 60 Hz, fixed, independent of the grip setting")
 
 
