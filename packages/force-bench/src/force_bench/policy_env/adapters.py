@@ -708,8 +708,11 @@ class DialAdapter(Adapter):
                                       "min_move_mm": dt.MOVE_MIN * 1e3, "upstream": "identical thresholds; the move is "
                                       "measured from the last contact (upstream: from the expert's open phase)"}
         finite = bool(np.isfinite(ang).all())
+        h = getattr(self.ex, "h", None)            # the dial kit's handle: which collider the robot touched on the bar
+        bar = (getattr(h, "info", {}) or {}).get("bar_collider") if h is not None else None
         return {"pass": bool(all(v["pass"] for v in crit.values()) and finite), "criteria": crit, "finite": finite,
-                "t_end_s": round(float(t[-1]), 3), "final_error_deg": round(err, 2)}
+                "t_end_s": round(float(t[-1]), 3), "final_error_deg": round(err, 2),
+                "dial_bar_collider": bar or {"type": "mesh", "source": "the knob's CAD mesh (dial_knob_flat.stl)"}}
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
