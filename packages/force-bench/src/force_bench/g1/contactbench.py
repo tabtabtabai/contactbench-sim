@@ -7,8 +7,9 @@ import.  The other helpers import what they need when called.
 Per test the G1 row, its settings and its plan (``ROWS``):
   5.1 knob and 5.5 handle: the offline MuJoCo plans at the fixed stance (data/plans), finger effort 80 N;
   5.2 bulb and 5.7 nut: the kit's own expert through the online IK shim, at their fixed stances;
-  5.6 dial: the two-stroke regrasp expert at the one stance (0.33, 0.10), tips +8 mm, 70 N, 4x finger damping, with
-      the planner's IK tables (data/plans), on the bar's exact box collider.
+  5.6 dial: the single-grasp expert (the FR3 row's own, through the G1 IK shim) at the one stance (0.27, 0.25), on the
+      bar's exact box collider; only some seeds reach there (the others are full reach-miss records).  The two-stroke
+      regrasp mode (G1_DIAL_REGRASP=1, stance (0.33, 0.10), with data/plans' IK tables) stays selectable.
 Every G1 episode runs in the Isaac challenge scene (TB_TABLE=isaac), with mesh fingers and the model's arm kv.
 """
 
@@ -39,8 +40,8 @@ ROWS = {
     "5.7": {"task": "module:force_bench.appendix_tasks.screw_nut_onto_screw_g1", "plan": None, "env": {},
             "part": "bolt", "row": "screw_nut_onto_screw"},
     "5.6": {"task": "module:force_bench.appendix_tasks.turn_dial_g1_expert", "plan": "g1_dial_iktable_s{seed}.json",
-            "env": {"G1_FINGER_EFFORT": "70", "TB_DIAL_BAR_COLLIDER": "box", "G1_DIAL_REGRASP": "1",
-                    "G1_DIAL_STANCE": "0.33,0.10", "G1_DIAL_TIP_LIFT": "0.008", "G1_FINGER_KD_SCALE": "4"},
+            "env": {"G1_FINGER_EFFORT": "70", "TB_DIAL_BAR_COLLIDER": "box", "G1_DIAL_REGRASP": "0",
+                    "G1_DIAL_STANCE": "0.27,0.25", "G1_DIAL_TIP_LIFT": "0.0", "G1_FINGER_KD_SCALE": "1"},
             "part": "dial", "row": "turn_dial_to_target"},
 }
 
