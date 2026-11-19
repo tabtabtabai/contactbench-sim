@@ -125,7 +125,10 @@ Run:  python -m force_bench.appendix_tasks.install_light_bulb [--bulb lightbulb-
       <row>__seed<N>;
       env KT_STOP_AFTER=<phase> ends a rollout when <phase> starts (iteration only, no verdict);
       KT_DEBUG_D_MM=<mm> starts the part on its thread that far above the seat (iteration only);
-      `kill -USR1 <pid>` ends a running rollout with the expert log dumped
+      `kill -USR1 <pid>` ends a running rollout with the expert log dumped;
+      TB_BAD_ENDING=untightened (opt-in, for the solvability proof; the judge must fail it): the expert stops
+      twisting at the seat touch, before the tightness condition (pad torque >= TAU_TIGHT with the flanks preloaded,
+      then stalled), and releases, retreats and is probed as usual without re-tightening
 """
 
 from __future__ import annotations
@@ -148,7 +151,8 @@ from force_bench.rig import make_solver, set_finger_effort_limit
 from force_bench.robot.franka import down_grasp_quat
 from force_bench.tasks.nut_bolt_arm import PairProbe, YawTrack
 from force_bench.appendix_tasks.common import (
-    appendix_rig, RobotContactProbe, check_released_and_clear, save_appendix_verdict, StopRun, Placement, sample_start)
+    appendix_rig, RobotContactProbe, bad_ending, check_released_and_clear, save_appendix_verdict, StopRun, Placement,
+    sample_start)
 
 MM = 1.0e-3
 
@@ -775,6 +779,7 @@ class ScrewExpert:
         self.R_tcp_in_l7 = rotm(l7).T @ rotm(np.r_[0.0, 0.0, 0.0, q_tcp])
         self.tcp0 = np.asarray(tcp0, float)
         self.F = fingers                      # touch / grip / open finger targets
+        self.untightened = bad_ending("_kit_thread (screw-in rows)", ("untightened",)) == "untightened"
         self.part_yaw = YawTrack()
         self.omega_f = 0.0
         self._by_prev = None
@@ -1058,15 +1063,22 @@ class ScrewExpert:
                 self._seat_touch(t, by, row, seat)
             torque = tp["tau_pads"]
             done = False
+            if self.untightened and st["t_seat"] is not None:
+                # bad ending (TB_BAD_ENDING=untightened): stop twisting at the seat touch, short of the tightness
+                # condition, and go on to the release as if it were tight
+                self._stroke_end(t, by)
+                self._tight(t, by, "bad ending: untightened (stopped at the seat touch)")
+                done = True
             # tight = the torque crossed TAU_TIGHT with the seat loaded, the wrist then held still, and the
             # part did not turn over T_TIGHT_CONFIRM (stalled).  The wound-up pad torque itself is allowed to
             # relax during the hold: MuJoCo's friction is regularised and creeps under a static load.
             # the thread PRELOAD is the flanks' downward pull on the part (-flank z); a hand pushing the part
             # onto its seat loads the seat face too, but not the flanks
             preloaded = -float(tp["flank"][2]) >= PRELOAD_TIGHT
-            if st["t_seat"] is not None and torque >= TAU_TIGHT and preloaded and st["hold_since"] is None:
+            if not done and st["t_seat"] is not None and torque >= TAU_TIGHT and preloaded \
+                    and st["hold_since"] is None:
                 st["hold_since"], st["hold_by"], st["tau_peak"] = t, by, torque
-            if st["hold_since"] is not None:
+            if not done and st["hold_since"] is not None:
                 st["tau_peak"] = max(st["tau_peak"], torque)
                 if t - st["hold_since"] >= T_TIGHT_CONFIRM:
                     turned = abs(by - st["hold_by"])
@@ -1133,7 +1145,8 @@ class ScrewExpert:
             if tau >= T_CHECK:
                 pre = float(np.mean(st["preload_hist"][len(st["preload_hist"]) // 2:]))
                 st["checks"].append({"t": round(t, 2), "preload_N": round(pre, 2)})
-                if pre >= PRELOAD_MIN or st["retighten"] >= MAX_RETIGHTEN or st["t_seat"] is None:
+                if pre >= PRELOAD_MIN or st["retighten"] >= MAX_RETIGHTEN or st["t_seat"] is None \
+                        or self.untightened:
                     st["z_rel"] = st["z"]
                     self.go("retreat", t)
                 else:                         # it relaxed: re-grip at the seat reference and tighten again

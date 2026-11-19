@@ -23,6 +23,10 @@ Expert, top-down, every command closed on MEASURED state:
      turned, to 45 deg;
   5  hold the door open and stop (the reference videos end holding the lifted door; a released flat door falls shut).
 
+Bad ending (TB_BAD_ENDING, opt-in, for the solvability proof; the judge must fail it):
+  forced_door  the knob is never turned (the latch stays in the strike) and the leaf is pulled up the hinge arc on
+               the reference itself, without the bounded lead over the measured door angle
+
 Run: python -m force_bench.appendix_tasks.turn_doorknob_open_door_flat [--knob 1|2 --diameter 50|55|60 --unlock
 40|48|60|72|80 --spring 5|7.5|10 --name <output>]
 """
@@ -38,7 +42,7 @@ from force_bench.appendix_tasks._door_kit import (
     CAM_POS, CAM_TARGET, LOCK_PROBE_NM, LOCK_PROBE_S, Hinge, HingeProbe, arm_filter, build_door, door_angle,
     door_penetration, down_quat, drawn_shapes, fingers_filter, joint_reader, lock_probe_check, make_rig, pads_check,
     smooth, door_pose)
-from force_bench.appendix_tasks.common import save_appendix_verdict
+from force_bench.appendix_tasks.common import bad_ending, save_appendix_verdict
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver, set_finger_effort_limit
 
@@ -79,6 +83,7 @@ def parse(argv=None):
 
 def main(argv=None):
     a = parse(argv)
+    forced = bad_ending(NAME, ("forced_door",)) == "forced_door"
     choice = {"Doorknob geometry": f"Doorknob {a.knob}, {a.diameter}mm diameter",
               "Amount of rotation to unlock": f"{a.unlock}°", "Rotation force": f"{a.spring}mm spring"}
     name = a.name or NAME
@@ -134,7 +139,7 @@ def main(argv=None):
             z_off, fg = HOVER * (1.0 - smooth((t - T[0]) / T_DESC)), FINGERS_OPEN
         elif t < T[2]:
             fg = FINGERS_OPEN + (FINGERS_GRIP - FINGERS_OPEN) * smooth((t - T[1]) / T_CLOSE)
-        if t >= T[2]:
+        if t >= T[2] and not forced:
             # turn on the MEASURED latch: advance while it is still in the strike (also if a pad slip lets it back in
             # during the lift), with a bounded lead over the measured angle; freeze once it has passed the jamb
             if x_m >= clear_m:
@@ -149,7 +154,7 @@ def main(argv=None):
                 th_r = -OPEN_TO * smooth((t - T[4]) / T_OPEN)
             else:
                 th_r = -OPEN_TO
-            th = float(np.clip(th_r, th_m - lead_ang, th_m + lead_ang))
+            th = float(th_r) if forced else float(np.clip(th_r, th_m - lead_ang, th_m + lead_ang))
         tcp = hinge.arc(g0 + np.array([0.0, 0.0, z_off]), th)
         rig.drive_arm(tcp, down_quat(YAW0 + st["ph"], th), fingers=fg)
 

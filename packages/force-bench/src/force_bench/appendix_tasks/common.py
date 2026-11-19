@@ -55,6 +55,23 @@ class StopRun(Exception):
     keeps every frame captured so far)."""
 
 
+# The bad ending the running row's expert applied (bad_ending()), read by policy_env.episode.run_row into the judge's
+# output; None for every normal run.
+APPLIED_BAD_ENDING = None
+
+
+def bad_ending(row: str, allowed: tuple[str, ...]) -> str | None:
+    """``TB_BAD_ENDING=<name>`` (opt-in, off by default): the row's scripted expert ends badly in one named way, a
+    deliberately failed expert for the solvability proof (the world-state judge must fail it).  Called by the row
+    when it builds its expert; a name the row does not implement exits instead of running the clean expert."""
+    global APPLIED_BAD_ENDING
+    name = os.environ.get("TB_BAD_ENDING") or None
+    if name is not None and name not in allowed:
+        raise SystemExit(f"TB_BAD_ENDING={name!r}: {row} implements {', '.join(allowed)}")
+    APPLIED_BAD_ENDING = name
+    return name
+
+
 def run_until(rig, duration, control, extra, done):
     """``rig.run`` that stops as soon as ``done(t)`` is true, so a variant
     whose ending starts at a state-dependent time does not idle out a

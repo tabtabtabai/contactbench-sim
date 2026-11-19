@@ -311,6 +311,7 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
     import force_bench.appendix_tasks.common as common
     appendix_out = common.APPENDIX_OUT
     common.APPENDIX_OUT = out_dir / "appendix_tasks"
+    common.APPLIED_BAD_ENDING = None         # set by the row if its expert applies TB_BAD_ENDING
     adapter_cls = adapter_for(spec.module)
     mod = importlib.import_module(spec.dotted)
     box = {}
@@ -337,6 +338,8 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
             ep.end("expert_finished")
         ep.adapter.judge_phase()
         box["judge"] = ep.adapter.judge()
+        if common.APPLIED_BAD_ENDING is not None:   # a deliberately failed expert (solvability proof)
+            box["judge"]["bad_ending"] = common.APPLIED_BAD_ENDING
         if ep.finger_mag is not None:
             series = ep.finger_mag.series
         else:                                    # a G1 row: its rule-A probes' histories (t, f0, f1)
