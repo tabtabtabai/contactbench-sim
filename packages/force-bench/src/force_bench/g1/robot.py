@@ -502,6 +502,7 @@ class TorqueMonitor:
         n = len(self.names)
         self.peak, self.t_peak, self.ph_peak = np.zeros(n), np.zeros(n), [None] * n
         self.sat = np.zeros(n, int)
+        self.sat_phase = {}
         self.over = np.zeros(n, int)
 
     def sample(self, state, control, t, phase=None):
@@ -512,7 +513,13 @@ class TorqueMonitor:
         raw = self.ke * (qt - q) - self.kd * qd
         act = np.clip(raw, -self.cap, self.cap)
         tot = np.abs(act + ff)
-        self.sat += (np.abs(raw) >= self.cap - 1e-9).astype(int)
+        at = (np.abs(raw) >= self.cap - 1e-9)
+        self.sat += at.astype(int)
+        if at.any():                                   # where in the episode an actuator sits at its cap
+            ph = str(phase)
+            for k in np.flatnonzero(at):
+                d = self.sat_phase.setdefault(self.names[k], {})
+                d[ph] = d.get(ph, 0) + 1
         self.over += (tot > self.limit + 1e-6).astype(int)
         m = tot > self.peak
         self.peak[m], self.t_peak[m] = tot[m], t
@@ -523,6 +530,7 @@ class TorqueMonitor:
         return {n: {"peak_Nm": round(float(self.peak[k]), 3), "limit_Nm": float(self.limit[k]),
                     "margin_Nm": round(float(self.limit[k] - self.peak[k]), 3), "t": round(float(self.t_peak[k]), 3),
                     "phase": self.ph_peak[k], "frames_actuator_at_cap": int(self.sat[k]),
+                    "frames_at_cap_by_phase": self.sat_phase.get(n, {}),
                     "frames_over_limit": int(self.over[k])} for k, n in enumerate(self.names)}
 
 

@@ -148,6 +148,7 @@ class G1DialExpert(T.Expert):
 REGRASP = os.environ.get("G1_DIAL_REGRASP", "0") == "1"
 STROKE_MAX = math.radians(60.0)
 STROKE_MIN = math.radians(10.0)
+ROTATE_MAX = float(os.environ.get("G1_ROTATE_MAX", 0.9))   # rad/s peak, the open hand's turn between strokes
 LIFT = 0.030                         # m the open hand rises between strokes (the tips clear the bar's 53 mm top)
 DRIFT_TOL = math.radians(T.HALF_TICK_DEG)
 F_WIDE = DEX1_HALF_GAP_OPEN = 0.0416   # FR3-dof terms for the Dex1 fully open (83 mm): between strokes the jaws come
@@ -281,7 +282,7 @@ class G1DialRegraspExpert(G1DialExpert):
                 st["r_next"] = nxt
                 d = math.remainder(nxt[0] - st["r_yaw"], 2 * math.pi)
                 st["r_from"], st["r_to"] = st["r_yaw"], st["r_yaw"] + d
-                st["r_T"] = max(0.6, 1.875 * abs(d) / WRIST_MAX)
+                st["r_T"] = max(0.6, 1.875 * abs(d) / ROTATE_MAX)
                 self.go("r_rotate", t)
             return
         if ph == "r_rotate":
@@ -338,7 +339,8 @@ def main(argv=None):
             rig.builder.joint_target_ke[d] = T.FINGER_KE     # 20 kN/m on the Dex1 fingers chattered through the bar
             rig.builder.joint_target_kd[d] = T.FINGER_KD
     g = T._grip_geometry(load_kit()[key], choice, KNOB, h.info.get("up_gap_mm", 0.0) * T.MM)
-    g = {**g, "tcp_z": g["tip_z"] + DEX1_TIP_PAST_PAD}       # the Dex1 pad centre above its fingertips
+    tip_lift = float(os.environ.get("G1_DIAL_TIP_LIFT", 0.0))   # m: the fingertips this much above the FR3's (the
+    g = {**g, "tcp_z": g["tip_z"] + tip_lift + DEX1_TIP_PAST_PAD}   # grip band is 28-53 mm); the pad centre above
     axis = np.asarray(h.pose[:2, 3], float)
     tcp0 = np.array([axis[0], axis[1], g["tcp_z"]])
 
@@ -484,7 +486,8 @@ def main(argv=None):
                            "expert's TCP height is the grip's tip height + 27.3 mm",
         "dial_twist_rad_s": float(T.OMEGA),
         "dial_twist_source": "the FR3 expert's 45 deg/s wrist ramp, inside the G1 rule (<= 0.9 rad/s)",
-        "dial_turn_window_needed_deg": round(math.degrees(TURN_NEED), 1)}
+        "dial_turn_window_needed_deg": round(math.degrees(TURN_NEED), 1),
+        "dial_tip_lift_m": tip_lift, "dial_rotate_max_rad_s": ROTATE_MAX}
     (rig.out_dir / "g1_plan.json").write_text(json.dumps(rig.g1_plan, indent=1))
 
     # ── the drive the FR3 expert calls ──────────────────────────────────────────────────────────────────────
