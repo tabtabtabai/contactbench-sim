@@ -1,0 +1,506 @@
+"""Render versions 2 and 3 (clockwork-5 fork): materials, textures and lighting for the ContactBench scenes.
+
+VERSION 3 (``TB_RENDER_VERSION=3``) is the plain-realism look, matched to the real kit in upstream's task videos
+(jingyi-xiang.github.io/contactbench, website_assets/videos/tasks): the parts in their real filament colours
+(sampled from the videos: white PLA ~0.90, grey PLA ~0.44, black ~0.14, silver-grey ~0.44), the white ribbed board the
+fixtures stand on as the table top (sampled 0.84, with its strip seams), the light maple desk under it as the floor
+(sampled 0.78/0.66/0.51), neutral walls, a barely-there noise on every
+surface instead of decorative textures, and light-box lighting: ONE shadow-casting key light (``V3_KEY_SAMPLES``
+jittered samples over a ``V3_KEY_CONE_DEG`` cone, so the penumbra is smooth) plus a shadowless dome of fill lights that
+lifts the shadows (the raytracer's own ambient term is hard-coded, so the dome stands in for a brighter ambient).
+Exposure is set so an upward face receives ~1.0 of light: the displayed colour of a lit surface is its sRGB albedo,
+shaded in linear and written as sRGB by the renderer.  Everything below about the backdrop, smooth normals and the
+lighting patch applies to both versions; version 2's materials and lights are kept as they were.
+
+VERSION 2 (``TB_RENDER_VERSION=2``): the first pass, kept for reference.
+
+``TB_RENDER_VERSION=2`` turns it on for a process; the default, 1, is upstream's look and nothing here runs.  It
+changes only how the scene looks: camera poses, resolutions and fields of view are untouched, and the physics is
+not changed (the backdrop walls are visual-only shapes appended after every other shape, so no shape index moves and
+nothing new collides).
+
+What it does, within what Newton's tiled-camera raytracer supports (per-shape colors, 2-D textures through a
+triplanar projection on any shape, any number of directional/point/spot lights with hard shadow rays, a
+hemispheric ambient term, Lambert shading only):
+
+* MATERIALS by shape label (``MATERIALS``): an oak door and frame, a walnut table, brushed brass for the doorknob
+  and handle, satin and dark steel for the rosettes, gears and bolts, an opal (frosted) glass bulb, a black bakelite
+  socket, a dark anodised dial with a white scale and a red arrow, zinc-plated steel for the bolt and nut.  Each is a
+  procedural texture (``_texture``) projected triplanar in the shape's own frame, at a physical scale (cycles per
+  metre), so the CAD meshes need no UVs.
+* A FLOOR AND WALLS: the ground plane gets large stone tiles, and three plaster walls stand well behind the scene
+  (``add_backdrop``) in place of the flat backdrop gradient.
+* LIGHTS: a soft key light (``KEY_SAMPLES`` shadow-casting directional lights jittered within ``KEY_CONE_DEG``, so
+  shadow edges get a ``KEY_SAMPLES``-step penumbra), a fill and a rim light, each with its own intensity.
+* THE SPECKLED BULB: upstream shades the kit meshes with their flat triangle normals (they ship without vertex
+  normals), so finely tessellated round parts show a stipple of facet bands, worst on the bulb.  Version 2 gives the
+  rounded VISUAL-ONLY meshes (``SMOOTH``: the bulb, its socket, the round doorknob; their collision shapes are separate
+  and untouched) area-weighted vertex normals, which the raytracer interpolates (``smooth_normals``).  It also offsets
+  shadow rays by ``SHADOW_BIAS_M`` along the normal and the light direction (upstream: 0.1 mm along the normal),
+  against self-shadowing at the terminator once the shading normals are smooth.
+
+The last two need a per-light intensity and a shadow bias, which the raytracer does not expose, so version 2
+replaces Newton's ``lighting.create_compute_lighting_function`` with a copy that reads each light's intensity from
+the length of its direction vector and uses the larger bias (``_patch_lighting``; Newton 1.5.0).  The renderer has
+no specular term and no transparency: metal and glass are carried by their textures and colors only (see
+gs://tabtabtab-forge/clockwork-5/render-v2/PHOTOREAL.md for what a physically based path would take).
+"""
+
+from __future__ import annotations
+
+import os
+import re
+
+import numpy as np
+import warp as wp
+
+KEY_SAMPLES = 6
+KEY_CONE_DEG = 2.5
+KEY_INTENSITY = 1.00
+FILL_INTENSITY = 0.18
+RIM_INTENSITY = 0.22
+SHADOW_BIAS_M = 1.5e-3
+SHADOW_MIN_VISIBILITY = 0.15
+KEY_DIR = np.array([-0.5, 0.6, -0.62])     # the v1 key's travel direction, kept so shadows fall the same way
+FILL_DIR = np.array([0.72, -0.36, -0.58])
+RIM_DIR = np.array([0.15, -0.85, -0.45])   # from behind the scene, toward the cameras
+TEX_PX = 512
+
+# version 3: light box
+V3_KEY_SAMPLES = 24
+V3_KEY_CONE_DEG = 6.0
+V3_KEY_INTENSITY = 0.85
+V3_SHADOW_MIN_VISIBILITY = 0.0       # the key is fully occluded in shadow; the shadowless dome lifts it
+V3_DOME = [                          # (travel direction, intensity): no shadows, a soft wrap from above and around
+    ((0.0, 0.0, -1.0), 0.19),
+    ((0.7, 0.0, -0.7), 0.05), ((-0.7, 0.0, -0.7), 0.05),
+    ((0.0, 0.7, -0.7), 0.05), ((0.0, -0.7, -0.7), 0.06),
+    ((0.0, 0.0, 1.0), 0.04),         # a little bounce from below
+]
+
+
+def version() -> int:
+    try:
+        return int(os.environ.get("TB_RENDER_VERSION", "1"))
+    except ValueError:
+        return 1
+
+
+def enabled() -> bool:
+    return version() >= 2
+
+
+# ── materials ────────────────────────────────────────────────────────────────────────────────────────────────────
+# (label regex, material); the first match wins.  Labels are the model's shape labels (``force-bench`` kit parts are
+# "kit/<asset>/<part>"); unmatched shapes keep their color.
+MATERIALS = [
+    (r"^render_v2/floor$", "floor_tile"),
+    (r"^table$", "walnut"),
+    (r"^render_v2/wall", "plaster"),
+    (r"^kit/door/door(_frame_\d)?$", "oak"),
+    (r"^kit/doorknob_module/(doorknob_\d|door_handle_\d)", "brass"),
+    (r"^kit/doorknob_module/doorknob_module_(top|bottom)$", "satin_steel"),
+    (r"^kit/doorknob_module/doorknob_module_(gear|latch|spring)", "dark_steel"),
+    (r"^kit/lock_module/", "dark_steel"),
+    (r"^kit/bulb/", "opal_glass"),
+    (r"^kit/socket/", "bakelite"),
+    (r"^kit/dial/dial_(bottom|top)$", "anodised_black"),
+    (r"^kit/dial/dial_grid$", "enamel_white"),
+    (r"^kit/dial/dial_arrow$", "enamel_red"),
+    (r"^kit/dial/dial_knob", "satin_steel"),
+    (r"^kit/dial/(pad_\d|dial_spring)", "dark_steel"),
+    (r"^bolt$", "zinc"),
+    (r"^nut_shape$", "zinc"),
+]
+
+# version 3: the real kit's colours (sRGB, sampled from upstream's task videos where visible; kit print colours
+# otherwise), every surface with only a faint noise
+MATERIALS_V3 = [
+    (r"^render_v2/floor$", "desk"),
+    (r"^table$", "mat"),
+    (r"^render_v2/wall", "wall"),
+    (r"^kit/door/", "pla_white"),
+    (r"^kit/doorknob_module/(doorknob_\d|door_handle_\d)", "pla_grey"),
+    (r"^kit/doorknob_module/doorknob_module_(top|bottom)$", "pla_white"),
+    (r"^kit/doorknob_module/doorknob_module_(gear|latch|spring)", "pla_grey"),
+    (r"^kit/lock_module/lock_(top|bottom)$", "pla_white"),
+    (r"^kit/lock_module/", "pla_grey"),
+    (r"^kit/bulb/", "pla_white"),
+    (r"^kit/socket/", "pla_silver"),
+    (r"^kit/dial/dial_(bottom|top)$", "pla_black"),
+    (r"^kit/dial/dial_grid$", "pla_white"),
+    (r"^kit/dial/dial_arrow$", "pla_white"),
+    (r"^kit/dial/dial_knob", "pla_grey_light"),
+    (r"^kit/dial/(pad_\d|dial_spring)", "pla_black"),
+    (r"^bolt$", "pla_grey"),
+    (r"^nut_shape$", "pla_grey"),
+]
+SPEC_V3 = {
+    "mat": ((0.84, 0.845, 0.84), "mat", 3.3),
+    "desk": ((0.78, 0.66, 0.51), "desk", 1.5),
+    "wall": ((0.86, 0.86, 0.85), "plain", 1.0),
+    "pla_white": ((0.91, 0.91, 0.90), "pla", 40.0),
+    "pla_grey": ((0.45, 0.45, 0.46), "pla", 40.0),
+    "pla_grey_light": ((0.50, 0.50, 0.51), "pla", 40.0),
+    "pla_silver": ((0.45, 0.46, 0.47), "pla", 40.0),
+    "pla_black": ((0.14, 0.14, 0.15), "pla", 40.0),
+}
+
+
+def _materials():
+    return MATERIALS_V3 if version() >= 3 else MATERIALS
+
+
+def _spec():
+    return SPEC_V3 if version() >= 3 else SPEC
+
+
+# material -> (base color, texture kind, cycles per metre)
+SPEC = {
+    "floor_tile": ((0.56, 0.54, 0.50), "tile", 1.6),
+    "walnut": ((0.52, 0.36, 0.23), "wood_fine", 2.5),
+    "plaster": ((0.80, 0.78, 0.74), "plaster", 0.8),
+    "oak": ((0.70, 0.52, 0.33), "wood", 3.0),
+    "brass": ((0.80, 0.63, 0.32), "brushed", 18.0),
+    "satin_steel": ((0.72, 0.73, 0.75), "brushed", 18.0),
+    "dark_steel": ((0.38, 0.39, 0.41), "brushed", 22.0),
+    "zinc": ((0.58, 0.60, 0.63), "brushed", 30.0),
+    "opal_glass": ((0.95, 0.94, 0.91), "opal", 14.0),
+    "bakelite": ((0.13, 0.12, 0.11), "plaster", 20.0),
+    "anodised_black": ((0.16, 0.17, 0.19), "brushed", 25.0),
+    "enamel_white": ((0.93, 0.93, 0.91), None, 1.0),
+    "enamel_red": ((0.84, 0.17, 0.12), None, 1.0),
+}
+
+
+def _fbm(shape, rng, octaves=5):
+    """Fractal value noise in [0, 1] on a tileable grid."""
+    h, w = shape
+    out = np.zeros(shape, np.float32)
+    amp, tot = 1.0, 0.0
+    for o in range(octaves):
+        n = 4 * 2 ** o
+        g = rng.random((n, n)).astype(np.float32)
+        ys, xs = np.linspace(0, n, h, endpoint=False), np.linspace(0, n, w, endpoint=False)
+        y0, x0 = np.floor(ys).astype(int), np.floor(xs).astype(int)
+        fy, fx = (ys - y0)[:, None], (xs - x0)[None, :]
+        fy, fx = fy * fy * (3 - 2 * fy), fx * fx * (3 - 2 * fx)
+        a = g[y0 % n][:, x0 % n]
+        b = g[y0 % n][:, (x0 + 1) % n]
+        c = g[(y0 + 1) % n][:, x0 % n]
+        d = g[(y0 + 1) % n][:, (x0 + 1) % n]
+        out += amp * (a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy)
+        tot += amp
+        amp *= 0.5
+    return out / tot
+
+
+def _texture(kind: str, seed: int = 0) -> np.ndarray:
+    """A tileable grayscale-ish RGBA modulation texture (multiplies the material's base color)."""
+    rng = np.random.default_rng(seed)
+    n = TEX_PX
+    y, x = np.mgrid[0:n, 0:n].astype(np.float32) / n
+    if kind in ("wood", "wood_fine"):
+        # straight-grained boards: growth lines along u bent a little by low-frequency noise, fine fibres, and (for the
+        # table) plank seams with a tone per plank
+        warp_ = _fbm((n, n), rng, 3)
+        lines = 22 if kind == "wood" else 30
+        g = np.sin(2 * np.pi * (lines * y + 0.9 * warp_ + 0.15 * np.sin(2 * np.pi * x))) * 0.5 + 0.5
+        g = g ** 3.0
+        fibre = np.repeat(rng.random((n, 1)).astype(np.float32), n, axis=1)
+        fibre = 0.5 * fibre + 0.5 * _fbm((n, n), rng, 6)
+        v = 0.80 + 0.20 * (0.55 * (1 - g) + 0.45 * fibre)
+        if kind == "wood_fine":
+            planks = 4
+            idx = np.floor(y * planks).astype(int)
+            tone = 0.90 + 0.10 * rng.random(planks).astype(np.float32)
+            v = v * tone[idx % planks]
+            seam = np.abs(y * planks - np.round(y * planks)) < 0.012
+            v = np.where(seam, v * 0.55, v)
+        rgb = np.stack([v, v * 0.97, v * 0.93], -1)
+    elif kind == "brushed":
+        streak = np.repeat(rng.random((n, 1)).astype(np.float32), n, axis=1)
+        streak = np.clip(0.5 * streak + 0.5 * np.roll(streak, 1, 0), 0, 1)
+        v = 0.86 + 0.14 * (0.6 * streak + 0.4 * _fbm((n, n), rng, 3))
+        rgb = np.stack([v, v, v], -1)
+    elif kind == "opal":
+        v = 0.94 + 0.06 * _fbm((n, n), rng, 4)
+        rgb = np.stack([v, v, v * 0.99], -1)
+    elif kind == "tile":
+        noise = _fbm((n, n), rng, 6)
+        v = 0.80 + 0.20 * noise
+        grout = (np.minimum(np.abs(x - np.round(x * 2) / 2), np.abs(y - np.round(y * 2) / 2)) < 0.006)
+        v = np.where(grout, 0.55, v)
+        rgb = np.stack([v, v * 0.98, v * 0.95], -1)
+    elif kind == "mat":
+        # the real fixture's ribbed fabric mat: fine ribs (~3 cm at this scale) at a few percent, plus faint noise
+        ribs = 0.5 + 0.5 * np.sin(2 * np.pi * 14 * y)
+        v = 0.982 + 0.010 * ribs + 0.008 * (_fbm((n, n), rng, 5) - 0.5)
+        seam = np.abs(y * 3 - np.round(y * 3)) < 0.003          # the board's strips: a faint seam every ~10 cm
+        v = np.where(seam, v * 0.93, v)
+        rgb = np.stack([v, v, v], -1)
+    elif kind == "desk":
+        # the light maple desk the real board lies on: long, very low-contrast fibres, no rings or planks
+        fibre = np.repeat(rng.random((1, n)).astype(np.float32), n, axis=0)
+        fibre = 0.6 * fibre + 0.4 * _fbm((n, n), rng, 5)
+        v = 0.985 + 0.015 * fibre
+        rgb = np.stack([v, v, v], -1)
+    elif kind == "pla":
+        v = 0.985 + 0.015 * _fbm((n, n), rng, 5)
+        rgb = np.stack([v, v, v], -1)
+    elif kind == "plain":
+        v = 0.98 + 0.02 * _fbm((n, n), rng, 5)
+        rgb = np.stack([v, v, v], -1)
+    elif kind == "plaster":
+        v = 0.90 + 0.10 * _fbm((n, n), rng, 6)
+        rgb = np.stack([v, v, v], -1)
+    else:
+        rgb = np.ones((n, n, 3), np.float32)
+    rgba = np.concatenate([np.clip(rgb, 0, 1), np.ones((n, n, 1), np.float32)], -1)
+    return (rgba * 255 + 0.5).astype(np.uint8)
+
+
+def _match(label: str):
+    for pat, mat in _materials():
+        if re.search(pat, label):
+            return mat
+    return None
+
+
+def apply_colors(model) -> None:
+    """Material base colors on the model (shared by every camera); textured shapes then modulate them."""
+    if not enabled():
+        return
+    colors = model.shape_color.numpy().copy()
+    for i, lbl in enumerate(model.shape_label):
+        mat = _match(str(lbl or ""))
+        if mat is not None:
+            colors[i] = _spec()[mat][0]
+    model.shape_color.assign(colors.astype(np.float32))
+
+
+# meshes whose visual-only shape gets smooth vertex normals (round parts; sharp-edged parts stay faceted, since the
+# meshes share vertices across their creases and a crease would need the BVH mesh rebuilt)
+SMOOTH = r"^kit/(bulb|socket)/|^kit/doorknob_module/doorknob_\d"
+VISUAL_ONLY = 1          # shape_flags: visible, no collision
+
+
+def smooth_normals(model) -> None:
+    """Area-weighted vertex normals on the SMOOTH visual-only meshes, before any camera is built (the raytracer reads
+    them when it builds its mesh data).  Visual-only shapes only: collision never sees them."""
+    if not enabled():
+        return
+    flags, types = model.shape_flags.numpy(), model.shape_type.numpy()
+    import newton
+    for i, lbl in enumerate(model.shape_label):
+        if int(types[i]) != int(newton.GeoType.MESH) or int(flags[i]) != VISUAL_ONLY:
+            continue
+        if not re.search(SMOOTH, str(lbl or "")):
+            continue
+        mesh = model.shape_source[i]
+        if mesh is None or getattr(mesh, "normals", None) is not None:
+            continue
+        V = np.asarray(mesh.vertices, np.float64)
+        F = np.asarray(mesh.indices, np.int64).reshape(-1, 3)
+        fn = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])      # area-weighted face normals
+        vn = np.zeros_like(V)
+        for k in range(3):
+            np.add.at(vn, F[:, k], fn)
+        vn /= np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-12)
+        mesh._normals = vn.astype(np.float32)      # Mesh.normals is read-only; this is its backing field (newton 1.5.0)
+
+
+# ── the backdrop ─────────────────────────────────────────────────────────────────────────────────────────────────
+def add_backdrop(rig) -> None:
+    """A tiled floor and three plaster walls, visual only (appended last; no collision, no mass).
+
+    Every scene's table is a 1 cm box whose top is exactly at the ground plane (z = 0), so the two z-fight and the
+    winner varies by scene and view.  Version 2 hides the ground plane from the renderer only (its VISIBLE flag; it
+    keeps colliding) and draws a visual-only floor slab 2 mm below z = 0: hidden under the table, the floor beyond
+    it."""
+    if not enabled():
+        return
+    import newton
+    b = rig.builder
+    visible = int(newton.ShapeFlags.VISIBLE)
+    for i, lbl in enumerate(b.shape_label):
+        if str(lbl) == "ground_plane":
+            b.shape_flags[i] = int(b.shape_flags[i]) & ~visible
+    cfg = newton.ModelBuilder.ShapeConfig()
+    cfg.has_shape_collision = False
+    cfg.has_particle_collision = False
+    b.add_shape_box(body=-1, xform=wp.transform(wp.vec3(0.0, 0.2, -0.002 - 0.01), wp.quat_identity()),
+                    hx=2.4, hy=2.4, hz=0.01, cfg=cfg, label="render_v2/floor")
+    half_t, h = 0.02, 0.9
+    for label, p, hx, hy in (("render_v2/wall_back", (0.0, 1.6, h), 2.4, half_t),
+                             ("render_v2/wall_left", (-1.8, 0.2, h), half_t, 1.6),
+                             ("render_v2/wall_right", (1.8, 0.2, h), half_t, 1.6)):
+        b.add_shape_box(body=-1, xform=wp.transform(wp.vec3(*p), wp.quat_identity()), hx=hx, hy=hy, hz=h,
+                        cfg=cfg, label=label)
+
+
+# ── a camera sensor ──────────────────────────────────────────────────────────────────────────────────────────────
+def configure_sensor(cam, model) -> None:
+    """Version-2 textures and lights on one SensorTiledCamera (call before its first render)."""
+    if not enabled():
+        return
+    _patch_lighting()
+    from newton._src.sensors.warp_raytrace.types import TextureData, TextureProjectionMode
+    cfg = cam.default_render_config
+    cfg.enable_textures = True
+    cfg.enable_shadows = True
+    cfg.texture_projection_mode = TextureProjectionMode.TRIPLANAR
+    ctx = getattr(cam, "_SensorTiledCamera__render_context", None)
+    if ctx is None:
+        return
+    dev = ctx.device
+    ids = ctx.shape_texture_ids.numpy().copy() if ctx.shape_texture_ids is not None else \
+        -np.ones(len(model.shape_label), np.int32)
+    if (ids >= 0).any():          # keep any texture a mesh brought (none do in these scenes)
+        return _lights(ctx, dev)
+    datas, by_mat = [], {}
+    for i, lbl in enumerate(model.shape_label):
+        mat = _match(str(lbl or ""))
+        spec = _spec()
+        if mat is None or spec[mat][1] is None:
+            continue
+        if mat not in by_mat:
+            d = TextureData()
+            d.texture = wp.Texture2D(_texture(spec[mat][1], seed=len(by_mat)), filter_mode=wp.TextureFilterMode.LINEAR,
+                                     address_mode=wp.TextureAddressMode.WRAP, normalized_coords=True, dtype=wp.uint8,
+                                     num_channels=4, device=dev)
+            r = float(spec[mat][2])
+            d.repeat = wp.vec2f(r, r)
+            by_mat[mat] = len(datas)
+            datas.append(d)
+        ids[i] = by_mat[mat]
+    if datas:
+        # the device array only holds the textures' handles: keep the Python objects (and so the GPU textures) alive
+        # for the context's lifetime, as upstream does with its own list
+        ctx._render_v2_textures = datas
+        ctx.texture_data = wp.array(datas, dtype=TextureData, device=dev)
+        ctx.shape_texture_ids = wp.array(ids.astype(np.int32), dtype=wp.int32, device=dev)
+    apply_colors(model)
+    _lights(ctx, dev)
+
+
+def _lights(ctx, dev) -> None:
+    """Version 3: one soft key (V3_KEY_SAMPLES jittered shadow samples over a V3_KEY_CONE_DEG cone, spread over the cone's
+    area so the penumbra is smooth) and a shadowless dome.  Version 2: a soft key (6 samples), fill and rim.  Each
+    light's intensity is the length of its direction vector (see _patch_lighting)."""
+    if version() >= 3:
+        key = KEY_DIR / np.linalg.norm(KEY_DIR)
+        a = np.cross(key, [0.0, 0.0, 1.0])
+        a /= np.linalg.norm(a)
+        b = np.cross(key, a)
+        dirs, shadow = [], []
+        golden = np.pi * (3.0 - np.sqrt(5.0))
+        for k in range(V3_KEY_SAMPLES):          # a Fibonacci disc: even coverage of the cone, no rings
+            r = np.tan(np.radians(V3_KEY_CONE_DEG)) * np.sqrt((k + 0.5) / V3_KEY_SAMPLES)
+            ang = k * golden
+            d = key + r * (np.cos(ang) * a + np.sin(ang) * b)
+            dirs.append(d / np.linalg.norm(d) * (V3_KEY_INTENSITY / V3_KEY_SAMPLES))
+            shadow.append(True)
+        for vec, inten in V3_DOME:
+            v = np.asarray(vec, float)
+            dirs.append(v / np.linalg.norm(v) * inten)
+            shadow.append(False)
+        return _set_lights(ctx, dev, dirs, shadow)
+    key = KEY_DIR / np.linalg.norm(KEY_DIR)
+    a = np.cross(key, [0.0, 0.0, 1.0])
+    a /= np.linalg.norm(a)
+    b = np.cross(key, a)
+    dirs, shadow = [], []
+    for k in range(KEY_SAMPLES):
+        ang = 2 * np.pi * k / KEY_SAMPLES
+        r = np.tan(np.radians(KEY_CONE_DEG)) * (0.55 + 0.45 * (k % 2))
+        d = key + r * (np.cos(ang) * a + np.sin(ang) * b)
+        dirs.append(d / np.linalg.norm(d) * (KEY_INTENSITY / KEY_SAMPLES))
+        shadow.append(True)
+    for vec, inten in ((FILL_DIR, FILL_INTENSITY), (RIM_DIR, RIM_INTENSITY)):
+        dirs.append(vec / np.linalg.norm(vec) * inten)
+        shadow.append(False)
+    _set_lights(ctx, dev, dirs, shadow)
+
+
+def _set_lights(ctx, dev, dirs, shadow) -> None:
+    n = len(dirs)
+    ctx.lights_active = wp.array([True] * n, dtype=wp.bool, device=dev)
+    ctx.lights_type = wp.array([1] * n, dtype=wp.int32, device=dev)
+    ctx.lights_cast_shadow = wp.array(shadow, dtype=wp.bool, device=dev)
+    ctx.lights_position = wp.array([wp.vec3f(0.0)] * n, dtype=wp.vec3f, device=dev)
+    ctx.lights_orientation = wp.array([wp.vec3f(*map(float, d)) for d in dirs], dtype=wp.vec3f, device=dev)
+
+
+_PATCHED = False
+
+
+def _patch_lighting() -> None:
+    """Newton's lighting function with a per-light intensity (|direction| for directional lights) and a larger shadow
+    bias.  A copy of newton 1.5.0's ``create_compute_lighting_function``; the edits are marked."""
+    global _PATCHED, SHADOW_MIN_VISIBILITY
+    if _PATCHED:
+        return
+    if version() >= 3:
+        SHADOW_MIN_VISIBILITY = V3_SHADOW_MIN_VISIBILITY
+    from newton._src.core import MAXVAL
+    from newton._src.sensors.warp_raytrace import lighting, raytrace
+
+    def create_compute_lighting_function(config, state):
+        raytrace_first_hit = raytrace.create_first_hit_function(config, state)
+
+        @wp.func
+        def compute_lighting(
+            world_index: wp.int32, bvh_shapes_size: wp.int32, bvh_shapes_id: wp.uint64,
+            bvh_shapes_group_roots: wp.array[wp.int32], bvh_particles_size: wp.int32, bvh_particles_id: wp.uint64,
+            bvh_particles_group_roots: wp.array[wp.int32], shape_enabled: wp.array[wp.uint32],
+            shape_types: wp.array[wp.int32], shape_sizes: wp.array[wp.vec3f],
+            shape_transforms: wp.array[wp.transformf], shape_source_ptr: wp.array[wp.uint64],
+            light_active: wp.bool, light_type: wp.int32, light_cast_shadow: wp.bool, light_position: wp.vec3f,
+            light_orientation: wp.vec3f, particles_position: wp.array[wp.vec3f],
+            particles_radius: wp.array[wp.float32], topology_particle_mask: wp.array[wp.bool],
+            triangle_mesh_id: wp.uint64, triangle_mesh_group_roots: wp.array[wp.int32], normal: wp.vec3f,
+            hit_point: wp.vec3f,
+        ) -> wp.float32:
+            if not light_active:
+                return wp.float32(0.0)
+            L = wp.vec3f(0.0, 0.0, 0.0)
+            dist_to_light = wp.float32(MAXVAL)
+            attenuation = wp.float32(1.0)
+            intensity = wp.float32(1.0)
+            if light_type == 1:
+                L = wp.normalize(-light_orientation)
+                intensity = wp.length(light_orientation)            # EDIT: per-light intensity
+            else:
+                to_light = light_position - hit_point
+                dist_to_light = wp.length(to_light)
+                L = wp.normalize(to_light)
+                attenuation = 1.0 / (1.0 + 0.02 * dist_to_light * dist_to_light)
+                if light_type == 0:
+                    spot_dir = wp.normalize(light_orientation)
+                    cos_theta = wp.dot(-L, spot_dir)
+                    spot_factor = wp.min(1.0, wp.max(0.0, (cos_theta - 0.85) / (0.95 - 0.85)))
+                    attenuation = attenuation * spot_factor
+            ndotl = wp.max(0.0, wp.dot(normal, L))
+            if ndotl == 0.0:
+                return wp.float32(0.0)
+            visible = wp.float32(1.0)
+            if wp.static(config.enable_shadows) and light_cast_shadow:
+                # EDIT: a bias along the normal AND toward the light (upstream: 1e-4 m along the normal only)
+                shadow_origin = hit_point + normal * wp.static(SHADOW_BIAS_M) + L * wp.static(0.5 * SHADOW_BIAS_M)
+                max_t = wp.max(wp.float32(1.0e-4), wp.float32(dist_to_light - 1.0e-3))
+                if light_type == 1:
+                    max_t = wp.float32(1.0e8)
+                shadow_hit = raytrace_first_hit(
+                    bvh_shapes_size, bvh_shapes_id, bvh_shapes_group_roots, bvh_particles_size, bvh_particles_id,
+                    bvh_particles_group_roots, world_index, shape_enabled, shape_types, shape_sizes,
+                    shape_transforms, shape_source_ptr, particles_position, particles_radius,
+                    topology_particle_mask, triangle_mesh_id, triangle_mesh_group_roots, shadow_origin, L, max_t)
+                if shadow_hit:
+                    visible = wp.static(SHADOW_MIN_VISIBILITY)
+            return ndotl * attenuation * visible * intensity
+
+        return compute_lighting
+
+    lighting.create_compute_lighting_function = create_compute_lighting_function
+    _PATCHED = True

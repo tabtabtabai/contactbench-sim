@@ -261,6 +261,8 @@ class RolloutRecorder:
         self._light_rig()
         if palette:
             studio_palette(model)
+        from force_bench import render_v2
+        render_v2.configure_sensor(self.cam, model)      # render version 2 only: materials, textures, lights
         self.bg_top, self.bg_bottom = BG_TOP, BG_BOTTOM
 
         # SECOND VIEW.  Derived by orbiting the primary about its own look-at
@@ -373,6 +375,8 @@ class RolloutRecorder:
             self._look_pending = False
             if kit_look.apply_colors(self.model, self._look_name):
                 self.bg_top, self.bg_bottom = kit_look.background(self._look_name)
+            from force_bench import render_v2
+            render_v2.apply_colors(self.model)           # version 2 materials win over the kit look
         self.model.bvh_refit_shapes(state)
         self.cam.update(
             state,

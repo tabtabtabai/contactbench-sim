@@ -363,6 +363,8 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
     if qa_path is not None and with_upstream and ep.adapter.upstream_ok() and upstream_error is None:
         upstream = json.loads(qa_path.read_text())
     third = sorted(str(p) for p in out_dir.rglob("rollout*.mp4"))
+    from force_bench import render_v2
     return {"episode": ep, "judge": box["judge"], "upstream": upstream, "upstream_error": upstream_error,
+            "render_version": render_v2.version(),
             "videos": {"cameras": box.get("camera_videos", []), "third_person": third},
             "t_host_s": time.time() - t_host0, "row_argv": argv}
