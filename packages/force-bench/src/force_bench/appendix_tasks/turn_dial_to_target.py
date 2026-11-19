@@ -71,6 +71,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from pathlib import Path
 
 import numpy as np
 import trimesh
@@ -317,6 +319,17 @@ class Expert:
             qs = self.rig.model.joint_q_start.numpy()
             pads = [float(q[qs[self.h.joints[f"pad_{k}"]]]) for k in range(6)]
         off = tips[:2] - self.axis
+        if getattr(self, "diag_fr3", None) is not None:      # FR3_DIAG_CONTACTS=1: every finger contact (diagnosis)
+            from force_bench.g1.robot import contact_log
+            fing, knob_sh = self.diag_fr3
+            row = {"t": round(float(t), 4), "phase": self.st["phase"],
+                   "finger_q_m": [round(float(v), 6) for v in state.joint_q.numpy()[7:9]],
+                   "finger_body_q": [[round(float(v), 6) for v in bq[b]] for b in self.fi]}
+            for k, sh in fing.items():
+                cs = contact_log(self.rig.model, self.rig.contacts, state, sh, knob_sh)
+                row[f"contacts_{k}"] = cs
+                row[f"count_{k}"] = len(cs)
+            self.diag_rows.append(row)
         self.log.append({"t": t, "phase": self.st["phase"], "ang": ang, "press": press, "yaw_cmd": self.st["yaw_cmd"],
                          "fL": fl, "fR": fr, "robot": ro, "tips": tips.tolist(), "pads": pads,
                          "off_x": float(off[0]), "off_y": float(off[1])})
@@ -371,8 +384,29 @@ def run(dial: str, knob: str, target_deg: float, name: str | None = None, seed: 
     rig.probes.update(probes)
     fingers = [rig.body_index("fr3/fr3_leftfinger"), rig.body_index("fr3/fr3_rightfinger")]
     ex = Expert(rig, h, dial, knob, np.radians(target_deg), g, probes, fingers, yaw0)
+    if os.environ.get("FR3_DIAG_CONTACTS") == "1":
+        sb = rig.model.shape_body.numpy()
+        st_ = rig.model.shape_type.numpy()
+        fing = {nm: [i for i in range(rig.model.shape_count) if sb[i] == b] for nm, b in
+                (("left", fingers[0]), ("right", fingers[1]))}
+        knob_sh = [labels.index(x) for x in knob_shapes]
+        ex.diag_fr3, ex.diag_rows = (fing, knob_sh), []
+        sdf_idx = getattr(rig.model, "shape_sdf_index", None)
+        sdf_idx = sdf_idx.numpy() if sdf_idx is not None else None
+        def _desc(i):
+            return {"label": labels[i], "geo_type": int(st_[i]), "geo_type_name": str(newton.GeoType(int(st_[i])).name)
+                    if hasattr(newton, "GeoType") else None,
+                    "sdf_index": int(sdf_idx[i]) if sdf_idx is not None else None}
+        ex.diag_shapes = {"fingers": {nm: [_desc(i) for i in v] for nm, v in fing.items()},
+                          "knob": [_desc(i) for i in knob_sh]}
     budget = 16.0 + abs(target_deg) / 45.0
-    run_until(rig, budget, ex.control, ex.extra, lambda t: False)
+    run_until(rig, budget if not os.environ.get("G1_MAX_T") else min(budget, float(os.environ["G1_MAX_T"])),
+              ex.control, ex.extra, lambda t: False)
+    if getattr(ex, "diag_fr3", None) is not None:
+        from force_bench.g1.robot import solver_options_readback
+        Path(rig.out_dir, "fr3_contact_trace.jsonl").write_text("\n".join(json.dumps(r) for r in ex.diag_rows))
+        Path(rig.out_dir, "fr3_contact_shapes.json").write_text(json.dumps(
+            {**ex.diag_shapes, "solver_options_runtime": solver_options_readback(rig.solver)}, indent=1))
     paths = rig.rec.save("rollout", force_keys=["pads_N", "robot_object_contact_N"])
     return verdict(rig, h, g, ex, dial, knob, target_deg, key, choice, paths, seed, start)
 
