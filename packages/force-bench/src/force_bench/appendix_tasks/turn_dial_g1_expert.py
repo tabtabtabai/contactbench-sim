@@ -61,6 +61,7 @@ def parse(argv=None):
     ap.add_argument("--model", required=True)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--name", default=None)
+    ap.add_argument("--traj", default=None, help="the planner's IK table for this seed (the regrasp set)")
     return ap.parse_args(argv)
 
 
@@ -342,12 +343,42 @@ def main(argv=None):
     ik = G1IK(a.model, pelvis, SIDE, start_q)
     ik.arm_joints = [ik.g1["joints"][n] for n in ik.arm]
     jmap = {n: g1["joints"][n] for n in ik.arm}
+    table = json.loads(open(a.traj).read()) if (REGRASP and a.traj) else None
+    if table is not None:                                    # the planner's IK table: the band and the warm starts
+        if table["seed"] != a.seed or tuple(table["stance"]) != tuple(STANCE) or table["side"] != SIDE:
+            raise SystemExit(f"{a.traj}: IK table for seed {table['seed']} {table['stance']} {table['side']}, not "
+                             f"seed {a.seed} {STANCE} {SIDE}")
+        ik_qs0 = ik.model.joint_q_start.numpy()
+        col = {n: i for i, n in enumerate(table["arm_joints"])}
+        t_idx = np.array([int(ik_qs0[ik.g1["joints"][n]]) for n in ik.arm])
+        t_col = np.array([col[n] for n in ik.arm])
+        t_yaw = np.radians(np.asarray(table["yaws_deg_fr3"], float))
+        t_q = np.asarray(table["q"], float)
+
+        def warm(yaw):
+            """Seed the IK from the table's configuration at the nearest tabled yaw (within 5 deg)."""
+            d = np.abs(np.remainder(t_yaw - yaw + math.pi, 2 * math.pi) - math.pi)
+            k = int(np.argmin(d))
+            if d[k] <= math.radians(5.0) + 1e-6:
+                q = ik.joint_q.numpy()
+                q[0, t_idx] = t_q[k, t_col]
+                ik.joint_q.assign(q)
+    else:
+        warm = None
     if REGRASP:                                              # strokes: the band, and the first stroke from it
-        ys_b, ok_b = band_mask(ik, axis, tcp0[2])
+        if table is not None:
+            ys_b = np.radians(np.arange(-180.0, 180.0, 5.0))
+            ok_b = np.zeros(len(ys_b), bool)
+            for yd in table["yaws_deg_fr3"]:
+                ok_b[int(round((yd + 180.0) / 5.0)) % len(ys_b)] = True
+        else:
+            ys_b, ok_b = band_mask(ik, axis, tcp0[2])
         first = stroke_from(ys_b, ok_b, yaw0, math.radians(TARGET_DEG))
         fit = None
         if first is not None:
             q_home = ik.joint_q.numpy().copy()
+            if warm is not None:
+                warm(first[0])
             for _ in range(3):
                 ik.solve(tcp0, down_grasp_quat(first[0]), iterations=64)
             gm = np.abs(gravity_torques(ik.model, ik._state().body_q.numpy(), ik.arm_joints)) + 0.5
@@ -462,6 +493,9 @@ def main(argv=None):
     ik_arm_q = np.array([int(ik_qs[ik.g1["joints"][n]]) for n in ik.arm])
 
     def drive_arm(tcp_pos, tcp_quat, fingers=0.04):
+        if warm is not None:                                 # stay on the planner's branch
+            x, y_, z, w = (float(v) for v in tcp_quat)
+            warm(math.atan2(2 * (x * y_ + z * w), 1 - 2 * (y_ * y_ + z * z)))
         q = ik.solve(tcp_pos, tcp_quat, iterations=16)
         qt = rig.control.joint_target_q.numpy()
         qt[arm_t] = q[ik_arm_q]
