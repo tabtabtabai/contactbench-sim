@@ -131,7 +131,7 @@ class Adapter:
         if self.over == FORCE_LIMIT_FRAMES:
             cp = getattr(self.rig, "contact_peak", None)     # which contact is behind it, when the rig logs pairs
             self._fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=lim,
-                        measured=("per finger, the sum of contact magnitudes (contract #1773)"
+                        measured=("per finger, the normal-magnitude-sum: the sum of |f.n| over its contacts (contract #1773, 19 Nov)"
                                   if getattr(self.rig, "rule_a_probes", None) else "per pad"),
                         **({"contacts": cp.top, "peak_contact": cp.peak} if cp is not None else {}))
 
