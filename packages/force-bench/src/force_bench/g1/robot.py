@@ -506,6 +506,8 @@ def floor_and_table(builder: newton.ModelBuilder, floor_z: float, table_xy, half
             X = builder.shape_transform[i]
             builder.shape_transform[i] = wp.transform(wp.vec3(X[0], X[1], X[2] + floor_z),
                                                       wp.quat(X[3], X[4], X[5], X[6]))
+    if os.environ.get("TB_TABLE") == "isaac":     # the Isaac table slab (Rig.table) replaces the solid base
+        return
     cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5)
     builder.add_shape_box(-1, xform=wp.transform(wp.vec3(table_xy[0], table_xy[1], 0.5 * (floor_z - 0.01)),
                                                  wp.quat_identity()),
