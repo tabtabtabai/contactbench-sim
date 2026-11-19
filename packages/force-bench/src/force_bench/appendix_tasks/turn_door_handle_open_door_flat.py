@@ -24,6 +24,10 @@ Expert, every command closed on MEASURED state:
   4  hold the door open and stop (the reference videos end holding the lifted door; a flat door released at 45 deg
      falls shut).
 
+Bad ending (TB_BAD_ENDING, opt-in, for the solvability proof; the judge must fail it):
+  release_early  the lever is turned and the leaf lifted as usual, but the hand lets go once the door is open
+                 RELEASE_EARLY_DEG (short of the 5 deg success angle) and rises clear; the flat leaf falls back
+
 Run: python -m force_bench.appendix_tasks.turn_door_handle_open_door_flat [--handle 1|2 --unlock 40|48|60|72|80
 --spring 5|7.5|10 --name <output>]
 """
@@ -39,7 +43,7 @@ from force_bench.appendix_tasks._door_kit import (
     CAM_POS, CAM_TARGET, LOCK_PROBE_NM, LOCK_PROBE_S, Hinge, HingeProbe, arm_filter, build_door, door_angle,
     door_penetration, down_quat, drawn_shapes, fingers_filter, joint_reader, lock_probe_check, make_rig, pads_check,
     smooth, spin, door_pose)
-from force_bench.appendix_tasks.common import save_appendix_verdict
+from force_bench.appendix_tasks.common import bad_ending, save_appendix_verdict
 from force_bench.kit.mechanisms.doorknob_module import JAMB_CLEAR_MM
 from force_bench.rig import make_solver, set_finger_effort_limit
 
@@ -61,6 +65,9 @@ IMPRATIO = 10.0                # friction/normal impedance: at MuJoCo's 1.0 the 
 # sustained torque (measured: the knob slid back 2 deg in 1 s and the latch re-entered the strike) although its
 # Coulomb capacity is ~3x the load (plug_in_usb, hang_wrench, install_light_bulb use the same value)
 
+RELEASE_EARLY_DEG = 3.0       # TB_BAD_ENDING=release_early: let go at this door angle (success needs 5 deg)
+T_RISE = 1.0                   # ... and rise HOVER clear over this long
+
 T_SET, T_DESC, T_CLOSE, T_SW, T_PAUSE, T_OPEN, T_HOLD = 0.7, 1.4, 0.6, 3.0, 0.4, 3.6, 1.6
 T = np.cumsum([T_SET, T_DESC, T_CLOSE, T_SW, T_PAUSE, T_OPEN, T_HOLD])
 
@@ -78,6 +85,7 @@ def parse(argv=None):
 
 def main(argv=None):
     a = parse(argv)
+    early = bad_ending(NAME, ("release_early",)) == "release_early"
     choice = {"Door handle geometry": f"Handle {a.handle}", "Amount of rotation to unlock": f"{a.unlock}°",
               "Rotation force": f"{a.spring}mm spring"}
     name = a.name or NAME
@@ -151,7 +159,13 @@ def main(argv=None):
             lead = LEAD_MM * 1e-3 / max(1e-3, hinge.radius(spin(g0, st["ph"], axis_xy)))
             th = float(np.clip(th_r, th_m - lead, th_m + lead))
         grasp = spin(g0, st["ph"], axis_xy) + np.array([0.0, 0.0, z_off])
-        rig.drive_arm(hinge.arc(grasp, th), down_quat(YAW0 + st["ph"], th), fingers=fg)
+        tcp, quat = hinge.arc(grasp, th), down_quat(YAW0 + st["ph"], th)
+        if early and st.get("t_rel") is None and t >= T[4] and np.degrees(-th_m) >= RELEASE_EARLY_DEG:
+            st["t_rel"], st["rel_tcp"], st["rel_q"] = t, tcp, quat     # let go here, short of the 5 deg opening
+        if st.get("t_rel") is not None:
+            u = smooth((t - st["t_rel"]) / T_RISE)
+            tcp, quat, fg = st["rel_tcp"] + np.array([0.0, 0.0, HOVER * u]), st["rel_q"], FINGERS_OPEN
+        rig.drive_arm(tcp, quat, fingers=fg)
 
     def extra(state, t):
         bq = state.body_q.numpy()

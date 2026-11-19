@@ -42,3 +42,17 @@ tighten-way for 1 s. The expert runs its identical sequence itself.
   Upstream's `Hinge` and `door_angle` take the hinge along world +y, so a yawed door needs both rewritten and the
   expert re-verified. Yaw (±15°, clockwork-5 D3) is a follow-up. Seeded and nominal runs are reported separately.
 - **5.2:** upstream's own `--seed`: the socket moves within the same square, with no yaw (the socket is round).
+
+## Bad endings (solvability proof)
+
+`TB_BAD_ENDING=<name>` (opt-in, off by default) makes a row's scripted expert end badly in one named way, so the
+judge must fail it. These are deliberately failed experts, not policies; a name the row does not implement exits.
+The judge output carries `bad_ending: <name>` when the row applied one.
+
+| Row | Name | What the expert does instead |
+|---|---|---|
+| 5.1 doorknob | `forced_door` | never turns the knob (the latch stays in the strike) and pulls the leaf up the hinge arc on the reference, without the bounded lead |
+| 5.5 door handle | `release_early` | turns the lever and lifts as usual, lets go at 3° (short of 5°) and rises clear; the flat leaf falls back |
+| 5.2 bulb (and the other `_kit_thread` screw-in rows) | `untightened` | stops twisting at the seat touch, before the tightness condition, then releases, retreats and is probed without re-tightening |
+| 5.6 dial | `short_10deg` | turns and trims to 10° short of the target, then releases and retreats; the judged target is unchanged |
+| 5.7 nut | `early_release` | 3 of the 7 tighten-way strokes, then the plan's own open, lift, retreat and still |

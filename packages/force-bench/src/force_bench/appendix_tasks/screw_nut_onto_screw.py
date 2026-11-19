@@ -27,6 +27,11 @@ plan builder.  What differs:
   and stop.  The nut must stay where it was left (no back-off, no fall)
   and nothing of the robot may touch nut or bolt.
 
+Bad ending (TB_BAD_ENDING, opt-in, for the solvability proof; the judge must fail it):
+  early_release  only EARLY_STROKES of the N_STROKES tighten-way strokes, then the plan's own open + lift, retreat and
+                 still: the nut is released on the thread before it is fully engaged (the clean expert's strokes
+                 descend 0.36, 1.20, 1.28, 1.57, 1.22 ... mm; full engagement needs 5.51 mm, reached on stroke 5)
+
 Run: python -m force_bench.appendix_tasks.screw_nut_onto_screw
 """
 
@@ -37,7 +42,7 @@ import trimesh
 import warp as wp
 
 from force_bench.appendix_tasks.common import (
-    appendix_rig, RobotContactProbe, ease, check_released_and_clear,
+    appendix_rig, RobotContactProbe, bad_ending, ease, check_released_and_clear,
     save_appendix_verdict)
 from force_bench.probes import ForceProbe
 from force_bench.rig import make_solver
@@ -55,6 +60,7 @@ THREAD_TOP = 0.0270         # m, mesh-measured top of the full-radius thread
 NUT_H = 0.00702
 ENGAGED_Z = THREAD_TOP - NUT_H / 2      # nut centre at full engagement
 N_STROKES = 7
+EARLY_STROKES = 3           # TB_BAD_ENDING=early_release
 FING_TOUCH = 0.00785        # 15.50 mm flats + 0.17 mm pad offset, /2
 T_GRIP0 = 0.4
 T_RETREAT, T_STILL = 1.2, 1.2
@@ -63,6 +69,7 @@ FLOOR_DROP = 0.0090         # the TCP follows the nut ~6.5 mm down
 
 
 def main():
+    early = bad_ending(NAME, ("early_release",)) == "early_release"
     bake_yaw = (MATE_YAW_DEG + (Z_START - MATE_ZC) / LEAD * 360.0) % 360.0
     rig = appendix_rig(NAME)
     base_xf = wp.transform(wp.vec3(0.0, 0.325, 0.0), wp.quat_identity())
@@ -132,7 +139,7 @@ def main():
     wi = rig.body_index("fr3/fr3_link7")
 
     # no settle (the nut is already in the hand), tighten-way strokes only
-    plan, t_plan = build_plan([(-1.0, N_STROKES, False)], t_settle=0.0)
+    plan, t_plan = build_plan([(-1.0, EARLY_STROKES if early else N_STROKES, False)], t_settle=0.0)
     print("plan:", [(s["kind"], round(s["t0"], 2)) for s in plan], "total", round(t_plan, 2))
     drv = RegraspDriver(rig, plan, tcp0, ni, wi, part_z0=float(nut_pos[2]),
                         yaw_init=yaw_init, finger_grip=NA.FINGER_GRIP,

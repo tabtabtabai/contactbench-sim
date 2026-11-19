@@ -61,6 +61,10 @@ through the dial's yaw plus the target, and over the square (IK sweep, robot bas
 robot-side corner on the left; 0.05 rad at +20 deg) and >= 0.19 rad through the 90 deg turns (the elbow, at the
 robot-side edge).  The camera keeps its view of the dial.  The draw is recorded in the verdict ("start").
 
+BAD ENDING (TB_BAD_ENDING, opt-in, for the solvability proof; the judge must fail it):
+  short_10deg  the expert turns and trims to SHORT_DEG short of the target (toward its start), then releases and
+               retreats as usual; the target itself (what the verdict and the policy judge read) is unchanged
+
 Run:  force-bench run turn_dial_to_target [--target-deg 45] [--seed N]
       python -m force_bench.appendix_tasks.turn_dial_to_target --dial snap --knob round
       --seed N  random dial pose (0.15 x 0.15 m square, +-15 deg); ``force-bench run`` names the folder
@@ -78,7 +82,7 @@ import warp as wp
 
 import newton
 
-from force_bench.appendix_tasks.common import (Placement, RobotContactProbe, StopRun, appendix_rig,
+from force_bench.appendix_tasks.common import (Placement, RobotContactProbe, StopRun, appendix_rig, bad_ending,
                                                check_released_and_clear, ease, run_until, sample_start,
                                                save_appendix_verdict)
 from force_bench.appendix_tasks.registry import CRITERIA
@@ -139,6 +143,7 @@ LAG_MAX = np.radians(8.0)              # pause the ramp while the wrist leads th
 EXPERT_TRIM_GAIN = 0.20                # per frame on the knob angle error
 EXPERT_TRIM_CLAMP = np.radians(15.0)
 TRIM_TOL = np.radians(0.5)
+SHORT_DEG = 10.0               # TB_BAD_ENDING=short_10deg: the expert stops this far short of the target
 T_TRIM_MIN, T_TRIM_MAX = 0.3, 2.5
 T_OPEN, T_RETREAT, T_STILL = 0.5, 1.2, 1.0
 RETREAT = 0.060
@@ -190,7 +195,10 @@ class Expert:
                  yaw0: float = 0.0):
         self.rig, self.h, self.dial, self.knob = rig, h, dial, knob
         self.yaw0 = float(yaw0)                               # the dial's yaw: wrist yaws are relative to it
-        self.target = target
+        self.target = target                                  # what the verdicts judge against
+        short = bad_ending("turn_dial_to_target", ("short_10deg",)) == "short_10deg"
+        # what the expert turns to: the target, or (bad ending) SHORT_DEG short of it
+        self.goal = float(target - np.sign(target) * np.radians(SHORT_DEG)) if short else float(target)
         self.p = probes
         self.fi = fingers
         self.axis = np.asarray(h.pose[:2, 3], float)          # the dial axis in the world (CAD origin)
@@ -270,21 +278,21 @@ class Expert:
             return
         if ph == "turn":
             lead = st["yaw_cmd"] - ang
-            step = OMEGA / self.rig.fps * np.sign(self.target - st["yaw_cmd"])
+            step = OMEGA / self.rig.fps * np.sign(self.goal - st["yaw_cmd"])
             if abs(lead) < LAG_MAX or np.sign(lead) != np.sign(step):
-                st["yaw_cmd"] = float(self.target) if abs(self.target - st["yaw_cmd"]) <= abs(step) \
+                st["yaw_cmd"] = float(self.goal) if abs(self.goal - st["yaw_cmd"]) <= abs(step) \
                     else float(st["yaw_cmd"] + step)
             self.drive(st["yaw_cmd"], z, self.f_grip)
-            if st["yaw_cmd"] == self.target:
+            if st["yaw_cmd"] == self.goal:
                 self.go("trim", t)
             return
         if ph == "trim":
-            err = self.target - ang
+            err = self.goal - ang
             st["trim"] = float(np.clip(st["trim"] + EXPERT_TRIM_GAIN * err, -EXPERT_TRIM_CLAMP, EXPERT_TRIM_CLAMP))
-            self.drive(self.target + st["trim"], z, self.f_grip)
+            self.drive(self.goal + st["trim"], z, self.f_grip)
             st["in_tol"] = st["in_tol"] + 1.0 / self.rig.fps if abs(err) < TRIM_TOL else 0.0
             if (tau >= T_TRIM_MIN and st["in_tol"] >= 0.2) or tau >= T_TRIM_MAX:
-                st["z_release"], st["yaw_release"] = z, self.target + st["trim"]
+                st["z_release"], st["yaw_release"] = z, self.goal + st["trim"]
                 self.go("open", t)
             return
         yaw, zr = st["yaw_release"], st["z_release"]
