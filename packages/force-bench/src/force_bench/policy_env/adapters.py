@@ -29,6 +29,10 @@ from force_bench.policy_env.episode import closure
 
 GRIP_N, GRIP_FRAMES = 2.0, 3        # the door row's pads_check gate (2 N in every 3-frame window)
 BACKOUT_DEG = 30.0
+# A back-out counts only when the part's (unwrapped) angle STAYS more than BACKOUT_DEG past its best for BACKOUT_HOLD_S:
+# a contact jolt rattles a threaded part by +-20-35 deg for a frame or two and recovers (5.7's G1 nominal-0 at 71.9 s:
+# 2 isolated frames over 30 deg inside a 0.18 s rattle, back at a new best 0.12 s later), which is not a retry.
+BACKOUT_HOLD_S = 0.2
 ENVELOPE_SQUEEZE_LIMIT_N = 25.0     # bulb glass, report-only and provisional (unmeasured)
 FORCE_LIMIT_N = 150.0
 # How long a finger must stay above FORCE_LIMIT_N for force_limit to fire. 4 consecutive frames (67 ms at 60 Hz) is
@@ -65,6 +69,49 @@ def _elapsed(col, log, i, k) -> float:
     return float(col(log[k], "t")) - float(col(log[i], "t"))
 
 
+class Persist:
+    """A condition that must hold continuously for hold_s: update() returns the onset time once, when it has."""
+
+    def __init__(self, hold_s: float = BACKOUT_HOLD_S):
+        self.hold_s, self.since, self.fired = float(hold_s), None, False
+
+    def update(self, t: float, cond: bool):
+        if not cond:
+            self.since, self.fired = None, False
+            return None
+        if self.since is None:
+            self.since = t
+        if not self.fired and t - self.since >= self.hold_s - 1e-9:
+            self.fired = True
+            return self.since
+        return None
+
+
+class TurnTracker:
+    """The threaded rows' progress rule on a part's unwrapped rotation (turns, tighten-way positive): a redo when it
+    passes its best by 10 deg, a setback (back_out) when it stays BACKOUT_DEG below its best for BACKOUT_HOLD_S.
+    update() returns ("redo",) or ("back_out", onset_t, turns, best) or None; the offline re-judge runs this too."""
+
+    def __init__(self, hold_s: float = BACKOUT_HOLD_S):
+        self.best, self.persist, self.low = 0.0, Persist(hold_s), None
+
+    def update(self, t: float, turn: float):
+        ev = None
+        # the redo: 10 deg of progress past the lowest point since the setback (before 19 Nov it compared each frame
+        # with a best that followed every frame, so only a single-frame 10 deg jump counted and a steady recovery
+        # never closed the retry)
+        if self.low is not None:
+            self.low = min(self.low, turn)
+            if turn > self.low + 10.0 / 360:
+                ev, self.low = ("redo",), None
+        t0 = self.persist.update(t, turn < self.best - BACKOUT_DEG / 360)
+        if t0 is not None:
+            ev, self.best, self.low = ("back_out", t0, turn, self.best), turn, turn
+        elif self.persist.since is None:
+            self.best = max(self.best, turn)
+        return ev
+
+
 class Adapter:
     name = "base"
 
@@ -76,6 +123,7 @@ class Adapter:
         self.over = 0
         self.grip = _Run(GRIP_FRAMES)
         self.n_grips = 0
+        self.backout = Persist(BACKOUT_HOLD_S)
 
     # what the env applies besides the arm
     def scenery(self, t):
@@ -345,6 +393,7 @@ class BulbAdapter(Adapter):
         self.t_touch = None
         self.t_seat = None
         self.max_turns = 0.0
+        self.turns_tr = TurnTracker()
         self.hold, self.hold_j = None, None
         self.t_tight = None
         self.y_tight = None
@@ -400,12 +449,12 @@ class BulbAdapter(Adapter):
         if self.t_seat is None and self.t_touch is not None and c("seat") > kt.F_SEAT_TOUCH:
             self.t_seat = t
         n = self.turns(yaw)
-        if n > self.max_turns + 10.0 / 360:
+        ev = self.turns_tr.update(t, n)
+        if ev and ev[0] == "redo":
             self._redo(t, "progress")
-        if n < self.max_turns - BACKOUT_DEG / 360:
-            self._set_back(t, "back_out", turns=round(n, 3), max_turns=round(self.max_turns, 3))
-            self.max_turns = n
-        self.max_turns = max(self.max_turns, n)
+        elif ev:
+            self._set_back(ev[1], "back_out", turns=round(n, 3), max_turns=round(ev[3], 3))
+        self.max_turns = self.turns_tr.best
         # tight, measured as the row measures it: seated, pad torque >= TAU_TIGHT with the flanks preloaded, then
         # the part stalled (< STALL_HOLD_DEG) over T_TIGHT_CONFIRM
         # (sampled as the judge's _tight_index: hold from frame i, yaw one frame later, preload at the confirm frame)
@@ -610,7 +659,7 @@ class DialAdapter(Adapter):
         self.dial = self.ex.dial
         self.tol = np.radians(dt.SNAP_TOL_DEG if self.dial == "snap" else dt.HALF_TICK_DEG)
         self.free_n = CONTACT_FREE_N
-        self.best_err = None
+        self.best_err, self.err_high = None, None
         self.contact_run = _Run(GRIP_FRAMES)
         self.release_tips = None
         self.clear_since = None
@@ -624,15 +673,20 @@ class DialAdapter(Adapter):
         self._force(t, max(r["fL"], r["fR"]))
         ch = self._grip_update(t, min(r["fL"], r["fR"]) > GRIP_N)
         err = abs(r["ang"] - self.target)
-        if self.best_err is None or err < self.best_err - np.radians(10.0):
-            if self.best_err is not None:
-                self._redo(t, "progress")
-            self.best_err = err if self.best_err is None else min(self.best_err, err)
-        self.best_err = min(self.best_err, err)
-        if err > self.best_err + np.radians(BACKOUT_DEG):
-            self._set_back(t, "dial_turned_away", error_deg=round(float(np.degrees(err)), 1),
-                           best_error_deg=round(float(np.degrees(self.best_err)), 1))
+        if self.best_err is None:
             self.best_err = err
+        if self.err_high is not None:            # the redo: 10 deg back from the worst error since the setback
+            self.err_high = max(self.err_high, err)
+            if err < self.err_high - np.radians(10.0):
+                self._redo(t, "progress")
+                self.err_high = None
+        t0 = self.backout.update(t, err > self.best_err + np.radians(BACKOUT_DEG))
+        if t0 is not None:
+            self._set_back(t0, "dial_turned_away", error_deg=round(float(np.degrees(err)), 1),
+                           best_error_deg=round(float(np.degrees(self.best_err)), 1))
+            self.best_err, self.err_high = err, err
+        elif self.backout.since is None:
+            self.best_err = min(self.best_err, err)
         # the hand has let go for good: no contact for CLEAR_S and MOVE_MIN away from where the contact ended
         tips = np.asarray(r["tips"], float)
         touching = r["robot"] >= self.free_n
@@ -749,6 +803,7 @@ class NutAdapter(Adapter):
         self.min_z = float(sn.Z_START)
         self.yaw = None              # the nut's unwrapped rotation about the bolt axis, rad
         self._yaw_prev = None
+        self.turns_tr = TurnTracker()
         self.best_turn = 0.0         # best tighten-way rotation, turns (progress for setbacks: z bobs in the thread play)
         self.clear_since = None
         self.d0 = None
@@ -790,12 +845,12 @@ class NutAdapter(Adapter):
             self.yaw += (a - self._yaw_prev + np.pi) % (2 * np.pi) - np.pi
         self._yaw_prev = a
         turn = float(-(self.yaw - self._yaw0) / (2 * np.pi))
-        if turn > self.best_turn + 10.0 / 360:
+        ev = self.turns_tr.update(t, turn)
+        if ev and ev[0] == "redo":
             self._redo(t, "progress")
-        if turn < self.best_turn - BACKOUT_DEG / 360:
-            self._set_back(t, "back_out", turns=round(turn, 3), best_turns=round(self.best_turn, 3))
-            self.best_turn = turn
-        self.best_turn = max(self.best_turn, turn)
+        elif ev:
+            self._set_back(ev[1], "back_out", turns=round(turn, 3), best_turns=round(ev[3], 3))
+        self.best_turn = self.turns_tr.best
         self.min_z = min(self.min_z, z)
         if not self.ep.expert_driven:
             d = float(np.linalg.norm(tips - nut))
