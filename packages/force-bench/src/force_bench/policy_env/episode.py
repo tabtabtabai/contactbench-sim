@@ -86,7 +86,9 @@ class Episode:
         self.n_requests = 0
         self.expert_driven = False
         from force_bench.policy_env.finger_force import FR3_FINGERS, FingerMagnitudes
-        self.finger_mag = FingerMagnitudes(rig.model, getattr(adapter_cls, "finger_bodies", None) or FR3_FINGERS)
+        # a G1 row registers its own rule-A finger probes (each Dex1 jaw's two links): the episode reads those
+        self.finger_mag = None if getattr(rig, "rule_a_probes", None) else \
+            FingerMagnitudes(rig.model, getattr(adapter_cls, "finger_bodies", None) or FR3_FINGERS)
         self.finger_now = None
         self.adapter = adapter_cls(self)
         self.cams = None
@@ -202,7 +204,10 @@ class Episode:
             r = probe.sample(rig.contacts, rig.s0, self.t)
             forces[f"{pname}_N"] = round(r["force"], 4)
             forces[f"{pname}_fric_N"] = round(r["friction"], 4)
-        self.finger_now = self.finger_mag.sample(rig.contacts, self.t)   # rule A's force (sum of magnitudes)
+        if self.finger_mag is not None:
+            self.finger_now = self.finger_mag.sample(rig.contacts, self.t)   # rule A's force (sum of magnitudes)
+        else:
+            self.finger_now = [rig.probes[l].history[-1]["force"] for l in rig.rule_a_probes]
         if self.extra_cb:
             forces.update(self.extra_cb(rig.s0, self.t))
         if rig.rec is not None:
@@ -324,7 +329,12 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
             ep.end("expert_finished")
         ep.adapter.judge_phase()
         box["judge"] = ep.adapter.judge()
-        np.save(out_dir / "finger_force_magnitude.npy", np.asarray(ep.finger_mag.series, float))   # t, f0, f1
+        if ep.finger_mag is not None:
+            series = ep.finger_mag.series
+        else:                                    # a G1 row: its rule-A probes' histories (t, f0, f1)
+            hs = [rig_self.probes[l].history for l in rig_self.rule_a_probes]
+            series = [[hs[0][i]["t"], *(h[i]["force"] for h in hs)] for i in range(min(len(h) for h in hs))]
+        np.save(out_dir / "finger_force_magnitude.npy", np.asarray(series, float))   # t, f0, f1
         box["camera_videos"] = ep.close_videos()
         if with_upstream and ep.adapter.upstream_ok():
             return rig_self.rec          # the row's main() goes on to its own verdict on this rollout
