@@ -112,8 +112,126 @@ class TurnTracker:
         return ev
 
 
+# ── milestones (partial credit, CONTRACT: 3 per test, judged from world state over the rollout) ───────────────────
+# Each test's three are pure functions of per-frame world-state measurements the adapters already make, so the
+# unit tests drive them with synthetic traces and the offline re-judge with a stored rollout's.  A milestone's t is
+# the robot time it was first reached (onset for the held-for-0.5 s grasps); door_open_1deg and near_target also carry
+# held_at_end (is it still true at the episode's end).
+GRASP_S = 0.5
+
+
+class Milestones:
+    NAMES: tuple = ()
+    HELD: tuple = ()
+
+    def __init__(self):
+        self.t = {n: None for n in self.NAMES}
+        self.held = {n: False for n in self.HELD}
+
+    def _reach(self, name, t, cond=True):
+        if cond and self.t[name] is None:
+            self.t[name] = round(float(t), 3)
+
+    def as_list(self) -> list:
+        return [{"name": n, "reached": self.t[n] is not None, "t": self.t[n],
+                 **({"held_at_end": bool(self.held[n])} if n in self.held else {})} for n in self.NAMES]
+
+    @classmethod
+    def unreached(cls) -> list:
+        """All three not reached (a reach miss: no episode ran)."""
+        return [{"name": n, "reached": False, "t": None, **({"held_at_end": False} if n in cls.HELD else {})}
+                for n in cls.NAMES]
+
+
+class _Grasp:
+    """Both pads in contact (each above gate_n) continuously for GRASP_S: the onset time, once."""
+
+    def __init__(self, gate_n):
+        self.gate, self.p = float(gate_n), Persist(GRASP_S)
+
+    def update(self, t, f_left, f_right):
+        return self.p.update(t, min(f_left, f_right) > self.gate)
+
+
+class DoorMilestones(Milestones):
+    """5.1 knob / 5.5 handle, from DoorAdapter's measurements: the pad probes on the knob or lever (the row's
+    GRIP_N gate), the latch past the strike (t_clear: latch_x > JAMB_CLEAR_MM) and the leaf angle."""
+    NAMES = ("grasped", "latch_cleared", "door_open_1deg")
+    HELD = ("door_open_1deg",)
+
+    def __init__(self):
+        super().__init__()
+        self.grasp = _Grasp(GRIP_N)
+
+    def update(self, t, f_left, f_right, latch_cleared: bool, door_deg):
+        t0 = self.grasp.update(t, f_left, f_right)
+        if t0 is not None:
+            self._reach("grasped", t0)
+        self._reach("latch_cleared", t, latch_cleared)
+        unlocked = self.t["latch_cleared"] is not None
+        self._reach("door_open_1deg", t, unlocked and door_deg >= 1.0)
+        self.held["door_open_1deg"] = bool(unlocked and door_deg >= 1.0)
+
+
+class BulbMilestones(Milestones):
+    """5.2, from BulbAdapter's measurements (the ScrewExpert world-state log): in hand = both pads above PAD_N while the
+    bulb is >= 5 mm from where it started; threads engaged = thread-flank contact (the adapter's t_touch, thread >
+    THREAD_TOUCH_N); half the turns = its unwrapped turns past thread contact >= half the turns to tight (P.revs)."""
+    NAMES = ("grasped_lifted", "threads_engaged", "half_turns")
+    LIFT_M = 0.005
+
+    def update(self, t, f_left, f_right, pad_n, disp_m, threads: bool, turns, revs):
+        self._reach("grasped_lifted", t, min(f_left, f_right) > pad_n and disp_m >= self.LIFT_M)
+        self._reach("threads_engaged", t, threads)
+        self._reach("half_turns", t, revs > 0 and turns >= 0.5 * revs)
+
+
+class DialMilestones(Milestones):
+    """5.6, from DialAdapter's measurements (the row's logger: knob angle, pad forces): both pads above GRIP_N for
+    0.5 s; half way = turned at least half the way from its start angle to the target; near = within 2x the row's
+    tolerance of the target at any point (held_at_end: still there at the end)."""
+    NAMES = ("grasped", "half_turn", "near_target")
+    HELD = ("near_target",)
+
+    def __init__(self):
+        super().__init__()
+        self.grasp, self.ang0 = _Grasp(GRIP_N), None
+
+    def update(self, t, f_left, f_right, ang, target, tol):
+        t0 = self.grasp.update(t, f_left, f_right)
+        if t0 is not None:
+            self._reach("grasped", t0)
+        if self.ang0 is None:
+            self.ang0 = float(ang)
+        span = float(target) - self.ang0
+        self._reach("half_turn", t, abs(span) > 1e-9 and (float(ang) - self.ang0) / span >= 0.5)
+        near = abs(float(ang) - float(target)) <= 2.0 * float(tol)
+        self._reach("near_target", t, near)
+        self.held["near_target"] = bool(near)
+
+
+class NutMilestones(Milestones):
+    """5.7, from NutAdapter's measurements: the nut's unwrapped tighten-way rotation (its TurnTracker input) and its
+    height (engagement_mm: how much of its 7.02 mm is below the thread top).  It starts 1.5 mm onto the first thread,
+    so 'caught' asks that it turn on the thread: >= 30 deg tighten-way while it has descended at least half that
+    turn's helix lead below its start.  One turn = 360 deg tighten-way once caught; half engaged = >= 3.51 mm engaged."""
+    NAMES = ("threads_caught", "one_turn", "half_engaged")
+    CATCH_DEG = 30.0
+
+    def __init__(self, z_start, lead, engagement_mm, full_mm):
+        super().__init__()
+        self.z0, self.lead, self.eng, self.full = float(z_start), float(lead), engagement_mm, float(full_mm)
+
+    def update(self, t, turn, z):
+        caught = turn >= self.CATCH_DEG / 360 and self.z0 - z >= 0.5 * self.lead * self.CATCH_DEG / 360
+        self._reach("threads_caught", t, caught)
+        self._reach("one_turn", t, self.t["threads_caught"] is not None and turn >= 1.0)   # turned on the thread
+        self._reach("half_engaged", t, self.eng(z) >= 0.5 * self.full)
+
+
 class Adapter:
     name = "base"
+    milestones_cls = Milestones
 
     def __init__(self, ep):
         self.ep = ep
@@ -124,6 +242,13 @@ class Adapter:
         self.grip = _Run(GRIP_FRAMES)
         self.n_grips = 0
         self.backout = Persist(BACKOUT_HOLD_S)
+        self.ms = None                   # the test's Milestones (set by each adapter)
+
+    def milestones(self) -> list:
+        return self.ms.as_list() if self.ms is not None else self.milestones_cls.unreached()
+
+    def _rt(self, t):                    # robot time (world + latency charged so far), as the setbacks are stamped
+        return t + self.ep.charged_s
 
     # what the env applies besides the arm
     def scenery(self, t):
@@ -214,6 +339,7 @@ class Adapter:
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 class DoorAdapter(Adapter):
     name = "door"
+    milestones_cls = DoorMilestones
     HOLD_S = 1.0           # the row's motion_stopped window: the last 1 s, TCP drift < 3 mm, door range < 1 deg
 
     def __init__(self, ep):
@@ -233,6 +359,7 @@ class DoorAdapter(Adapter):
         self.t_below1 = 0.0          # the last frame the door was shut (< 1 deg): the final opening starts there
         self._pad_hist = []          # the last GRIP_FRAMES frames of (left, right) pad force
         self.grip_run_start = None   # since when both pads pass the row's grip gate (pads_check's 3-frame rule)
+        self.ms = DoorMilestones()
 
     def scenery(self, t):
         if not self.ep.expert_driven:
@@ -265,6 +392,7 @@ class DoorAdapter(Adapter):
         self._grip_update(t, min(pl, pr) > GRIP_N)
         if self.t_clear is None and self.latch_mm > self.jamb_mm:
             self.t_clear = t
+        self.ms.update(self._rt(t), pl, pr, self.t_clear is not None, self.door_deg)
         if self.t_clear is None and self.door_deg >= 1.0:
             if not any(e["kind"] == "forced_door" for e in self.ep.ev.irreversible):
                 self._fatal(t, "forced_door", door_deg=round(self.door_deg, 2),
@@ -372,6 +500,7 @@ class DoorAdapter(Adapter):
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 class BulbAdapter(Adapter):
     name = "bulb"
+    milestones_cls = BulbMilestones
     PAD_N = 1.0               # the row's real_finger_grasp gate (mean pad force > 1 N while twisting)
     THREAD_TOUCH_N = 0.05
     CLEAR_S = 0.4             # hand clear this long (and moved away) = the policy has let go for good
@@ -401,6 +530,7 @@ class BulbAdapter(Adapter):
         self.clear_since = None
         self.d0 = None
         self.gripping = _Run(GRIP_FRAMES)
+        self.ms, self.xyz0 = BulbMilestones(), None
 
     def _c(self, row, name):
         return row[self.cols[name]]
@@ -449,6 +579,10 @@ class BulbAdapter(Adapter):
         if self.t_seat is None and self.t_touch is not None and c("seat") > kt.F_SEAT_TOUCH:
             self.t_seat = t
         n = self.turns(yaw)
+        xyz = np.array([c("x"), c("y"), c("Z")])
+        self.xyz0 = xyz if self.xyz0 is None else self.xyz0
+        self.ms.update(self._rt(t), fL, fR, self.PAD_N, float(np.linalg.norm(xyz - self.xyz0)),
+                       self.t_touch is not None, n, float(self.P.revs))
         ev = self.turns_tr.update(t, n)
         if ev and ev[0] == "redo":
             self._redo(t, "progress")
@@ -646,6 +780,7 @@ class DialAdapter(Adapter):
     """The row's Expert object is used only as the world-state logger (its ``extra``: knob angle, press, pads, robot
     contact, fingertip midpoint); its phases and timestamps are never read by the judge."""
     name = "dial"
+    milestones_cls = DialMilestones
     TURN_RATE = np.radians(2.0)     # turning = the knob moves faster than this, with the hand on it
     CLEAR_S = 0.4
 
@@ -664,12 +799,16 @@ class DialAdapter(Adapter):
         self.release_tips = None
         self.clear_since = None
         self.t_judge = None
+        self.ms = DialMilestones()
 
     def monitor(self, t):
         super().monitor(t)
-        if self.ep.done or not self.ex.log or self.t_judge is not None:
+        if self.ep.done or not self.ex.log:
             return
         r = self.ex.log[-1]
+        self.ms.update(self._rt(t), r["fL"], r["fR"], r["ang"], self.target, self.tol)   # the judge phase too: the end
+        if self.t_judge is not None:
+            return
         self._force(t, max(r["fL"], r["fR"]))
         ch = self._grip_update(t, min(r["fL"], r["fR"]) > GRIP_N)
         err = abs(r["ang"] - self.target)
@@ -785,6 +924,7 @@ class NutAdapter(Adapter):
     """The row's log (t, nut z, robot contact, left pad, right pad) is the world-state log; the expert's plan, stroke
     windows and t_plan are never read by the judge."""
     name = "nut"
+    milestones_cls = NutMilestones
     CLEAR_S = 0.4
     AWAY_M = 0.025
     DESCEND = 0.05e-3          # m/s: the nut is screwing down (helix descent) faster than this
@@ -808,6 +948,7 @@ class NutAdapter(Adapter):
         self.clear_since = None
         self.d0 = None
         self.t_judge = None
+        self.ms = NutMilestones(sn.Z_START, self.lead, self.engagement_mm, sn.NUT_H * 1e3)
 
     def _tips(self):
         bq = self.rig.s0.body_q.numpy()
@@ -851,6 +992,7 @@ class NutAdapter(Adapter):
         elif ev:
             self._set_back(ev[1], "back_out", turns=round(turn, 3), best_turns=round(ev[3], 3))
         self.best_turn = self.turns_tr.best
+        self.ms.update(self._rt(t), turn, z)
         self.min_z = min(self.min_z, z)
         if not self.ep.expert_driven:
             d = float(np.linalg.norm(tips - nut))
@@ -945,6 +1087,11 @@ ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "turn_door_handle_open_
             "turn_doorknob_open_door_flat_g1": DoorAdapter, "turn_door_handle_open_door_flat_g1": DoorAdapter,
             "install_light_bulb_g1": BulbAdapter, "turn_dial_to_target_g1": DialAdapter,
             "screw_nut_onto_screw_g1": NutAdapter, "turn_dial_g1_expert": DialAdapter}
+
+
+def milestones_unreached(module: str) -> list:
+    """A row's three milestones, none reached (a reach miss)."""
+    return adapter_for(module).milestones_cls.unreached()
 
 
 def adapter_for(module: str):
