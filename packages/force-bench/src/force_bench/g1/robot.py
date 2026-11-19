@@ -93,6 +93,11 @@ def _load_hulls(npz_path) -> dict:
         "max_mesh_outside_hulls_mm": max(v["mesh_outside_hulls_max_mm"] for v in links.values()),
         "per_link": links,
         "contact_parameters": "unchanged from the box model (mu, solref/solimp, margins, finger drive)",
+        "pad_face_half_gap_q0_mm": round(1e3 * float(meta["pad_face_half_gap_q0_m"]), 2),
+        "box_face_half_gap_q0_mm": round(1e3 * DEX1_HALF_GAP0_BOX, 2),
+        "finger_targets": ("re-derived from the hull pad faces: every expert's finger target is a half-gap measured "
+                           "from DEX1_HALF_GAP0, the mesh pad plates' inner face at joint 0 (the box model used the "
+                           "finger-body box's face, 3.5 mm proud of the real pad); no other change"),
     })
     return {b: [(v, f) for _, v, f in sorted(p, key=lambda t: t[0])] for b, p in out.items()}
 
@@ -421,6 +426,12 @@ PAD_CENTRE = np.array([0.0, 0.120, 0.0])     # the Dex1 pads' centre in the hand
 # width): R_dex1 = R_fr3_tcp @ TCP_TO_HAND
 TCP_TO_HAND = np.column_stack([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
 DEX1_HALF_GAP0 = 0.0215                      # finger joint 0 = a 43 mm pad gap; -0.02 = 83 mm (half-gap 0.0215 - q)
+# The grip face's half-gap at finger joint 0, which every expert's finger target is measured from (dex1_q, the knob's
+# close).  Box fingers: the finger-body box's inner face (21.55 mm, which stands 3.5 mm proud of the real pad plate
+# over the pad).  Mesh fingers: the pad plates' own inner face, measured on the hulls (finger_hulls writes it).
+DEX1_HALF_GAP0_BOX = DEX1_HALF_GAP0
+if FINGER_COLLISION == "mesh" and FINGER_HULLS:
+    DEX1_HALF_GAP0 = float(json.loads(str(np.load(FINGER_HULLS, allow_pickle=False)["meta"]))["pad_face_half_gap_q0_m"])
 
 
 def _R_xyzw(q):
@@ -725,6 +736,8 @@ def add_rule_a_probes(rig, side: str, net_probes=None) -> tuple:
     (rig.net_probes) for comparison."""
     for k in (1, 2):
         rig.probes[f"g1/finger{k}"] = MagnitudeProbe(rig.model, [f"{PREFIX}{side}_hand_Link{k}_{j}" for j in (2, 3)])
+        for j in (2, 3):          # per link, for diagnosis only (Link_3 the pad plate, Link_2 the finger body)
+            rig.probes[f"g1/finger{k}_link{j}"] = MagnitudeProbe(rig.model, [f"{PREFIX}{side}_hand_Link{k}_{j}"])
     rig.rule_a_probes = ("g1/finger1", "g1/finger2")
     rig.net_probes = tuple(net_probes or ())
     return rig.rule_a_probes

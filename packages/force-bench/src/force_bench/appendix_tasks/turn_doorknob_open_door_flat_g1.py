@@ -48,6 +48,10 @@ from force_bench.rig import make_solver
 
 NAME = "turn_doorknob_open_door_flat_g1"
 FINGER_OPEN, FINGER_CLOSE = -0.02, 0.0          # Dex1 finger joints: -0.02 = 83 mm open; 0.0 = 43 mm (< the knob)
+# the close is a grip-face half-gap of 21.5 mm (the box model's face at joint 0): on mesh fingers the same half-gap
+# from the pad plates' measured face (robot.DEX1_HALF_GAP0), so the overdrive past the knob (the squeeze) is the same
+from force_bench.g1.robot import DEX1_HALF_GAP0 as _HG0, DEX1_HALF_GAP0_BOX as _HG0_BOX
+FINGER_CLOSE = FINGER_CLOSE + (_HG0 - _HG0_BOX)
 FINGER_CLOSE_BAR = 0.0245                       # fully closed: the lever's bar is far thinner than 43 mm (at 0.0 the
 #                                                 pads never pinched it: one pushed it, 6 N, the other 0 N); the
 #                                                 squeeze is the finger effort cap

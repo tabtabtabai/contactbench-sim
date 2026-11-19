@@ -46,7 +46,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model")
     ap.add_argument("out")
-    ap.add_argument("--threshold", type=float, default=0.05, help="CoACD concavity threshold")
+    ap.add_argument("--threshold", type=float, default=0.1,
+                    help="CoACD concavity threshold.  0.1: 11-12 pieces per finger body, 4.1 mm max stand-off; 0.05 "
+                         "(47-52 pieces, 3.1 mm) overflowed MuJoCo Warp's 8000-contact buffer near the door knob")
     a = ap.parse_args()
     d = np.load(a.model, allow_pickle=False)
     names = [str(n) for n in d["body_name"]]
@@ -76,7 +78,25 @@ def main():
                 arrays[f"{n}/{i}/v"] = np.asarray(h.vertices, np.float32)
                 arrays[f"{n}/{i}/f"] = np.asarray(h.faces, np.int32)
             print(n, json.dumps(res[n]), flush=True)
-    meta = {"method": "CoACD", "coacd_version": importlib.metadata.version("coacd"), "threshold": a.threshold,
+    # the pad plates' inner faces in the hand-base frame at finger joint 0 (every finger body's frame is a pure
+    # translation of the hand base): the half-gap the experts' finger targets are measured from (DEX1_HALF_GAP0)
+    def _offset(n):
+        o = np.zeros(3)
+        while not n.endswith("base_link"):
+            b = names.index(n)
+            o += d["body_pos"][b]
+            n = names[int(d["body_parent"][b])]
+        return o
+    faces = {}
+    for k, sgn in ((1, 1.0), (2, -1.0)):
+        link = f"left_hand_Link{k}_3"
+        V = np.vstack([arrays[x] for x in arrays if x.startswith(link + "/") and x.endswith("/v")]) + _offset(link)
+        faces[k] = float(sgn * (V[:, 0].min() if sgn > 0 else V[:, 0].max()))
+    if abs(faces[1] - faces[2]) > 1e-4:
+        raise SystemExit(f"pad faces not symmetric: {faces}")
+    meta = {"pad_face_half_gap_q0_m": round(0.5 * (faces[1] + faces[2]), 5),
+            "pad_face_source": "the hand_Link{1,2}_3 hulls' inner faces in the hand-base frame at finger joint 0",
+            "method": "CoACD", "coacd_version": importlib.metadata.version("coacd"), "threshold": a.threshold,
             "seed": 0, "model_sha256": hashlib.sha256(open(a.model, "rb").read()).hexdigest(), "links": res}
     np.savez(a.out, meta=json.dumps(meta), **arrays)
 
