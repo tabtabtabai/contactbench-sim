@@ -24,6 +24,7 @@ import argparse
 import json
 import math
 import os
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -35,6 +36,7 @@ from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, append
 from force_bench.appendix_tasks.install_light_bulb_g1 import (FLOOR_CB, PELVIS_Z_CB, TABLE_HALF, WRIST_MAX, dex1_q,
                                                               render_start)
 from force_bench.g1.robot import add_rule_a_probes
+from force_bench.g1 import robot as G1R
 from force_bench.g1.robot import (PREFIX, ContactPeak, G1IK, MagnitudeProbe, SumProbe, TorqueMonitor, add_g1, apply_look,
                                   camera_mounts, cap_headroom, effective_arm_caps, finger_readback, floor_and_table,
                                   gravity_torques, init_pose, sim_cap_readback)
@@ -143,8 +145,28 @@ class G1DialExpert(T.Expert):
         self.rig.model.joint_effort_limit.assign(lim)
         self.rig.solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
 
+    diag = None                       # G1_DIAG_TRACE=1: per frame the jaw state against the bar (for diagnosis)
+
     def extra(self, state, t):
         self.rig.torque_monitor.sample(state, self.rig.control, t, self.st["phase"])
+        if self.diag is not None:
+            bq = state.body_q.numpy()
+            q = state.joint_q.numpy()
+            qt = self.rig.control.joint_target_q.numpy()
+            p1, p2 = bq[self.fi[0], :3].astype(float), bq[self.fi[1], :3].astype(float)
+            c, u = 0.5 * (p1 + p2), (p2 - p1) / max(1e-9, float(np.linalg.norm(p2 - p1)))
+            off = float(np.dot(np.r_[self.axis, c[2]] - c, u))          # the dial axis from the jaw centre, closing dir
+            pr = self.rig.probes
+            lk = {f"f{k}_link{j}": round(float(pr[f"g1/finger{k}_link{j}"].history[-1]["force"]), 2)
+                  if pr.get(f"g1/finger{k}_link{j}") and pr[f"g1/finger{k}_link{j}"].history else None
+                  for k in (1, 2) for j in (2, 3)}
+            self.diag.append({"t": round(float(t), 4), "phase": self.st["phase"],
+                              "q_mm": [round(1e3 * float(q[i]), 3) for i in self.diag_q],
+                              "q_target_mm": [round(1e3 * float(qt[i]), 3) for i in self.diag_qt],
+                              "effort_cap_N": round(float(self._squeeze or 0.0), 2),
+                              "axis_off_jaw_centre_mm": round(1e3 * off, 3),
+                              "jaw_centre_xy_from_axis_mm": [round(1e3 * float(c[i] - self.axis[i]), 3) for i in (0, 1)],
+                              "tip_gap_mm": round(1e3 * float(np.linalg.norm(p2 - p1)), 3), **lk})
         return super().extra(state, t)
 
 
@@ -314,6 +336,8 @@ class G1DialRegraspExpert(G1DialExpert):
 
 
 def main(argv=None):
+    if G1R.FINGER_COMMAND == "force" and not REGRASP:
+        raise SystemExit("G1_FINGER_COMMAND=force: implemented for the regrasp dial only")
     a = parse(argv)
     start = sample_start({"dial": T.DIAL_PLACE}, a.seed)["dial"]
     yaw0 = float(start[2])
@@ -513,6 +537,8 @@ def main(argv=None):
     fin_t = [int(tqs[g1["joints"][n]]) for n in fingers]
     ik_arm_q = np.array([int(ik_qs[ik.g1["joints"][n]]) for n in ik.arm])
 
+    grip_ref = {}                                            # the expert, once built (its touch dof)
+
     def drive_arm(tcp_pos, tcp_quat, fingers=0.04):
         if warm is not None:                                 # stay on the planner's branch
             x, y_, z, w = (float(v) for v in tcp_quat)
@@ -520,7 +546,11 @@ def main(argv=None):
         q = ik.solve(tcp_pos, tcp_quat, iterations=16)
         qt = rig.control.joint_target_q.numpy()
         qt[arm_t] = q[ik_arm_q]
-        qt[fin_t] = dex1_q(float(fingers))
+        ex_ = grip_ref.get("ex")
+        if G1R.FINGER_COMMAND == "force" and ex_ is not None and float(fingers) < ex_.f_touch:
+            qt[fin_t] = G1R.force_grip_target(grip_ref["kp"])      # past touch: the grip-force close
+        else:
+            qt[fin_t] = dex1_q(float(fingers))
         rig.control.joint_target_q.assign(qt)
         jf = rig.control.joint_f.numpy()
         jf[arm_d] = np.clip(gravity_torques(rig.model, rig.s0.body_q.numpy(), arm_j), -budget, budget)
@@ -534,6 +564,11 @@ def main(argv=None):
         ex = G1DialRegraspExpert(rig, h, DIAL, KNOB, math.radians(TARGET_DEG), g, probes, tips, a0)
         kp_f = float(rig.model.joint_target_ke.numpy()[fdofs[0]])
         ex.f_grip = max(0.0, ex.f_touch - 1.25 * T.SQUEEZE[KNOB] / kp_f)   # the cap (70 N) binds at the Dex1's gain
+        grip_ref.update(ex=ex, kp=kp_f)
+    if os.environ.get("G1_DIAG_TRACE") == "1":
+        ex.diag = []
+        ex.diag_q = [int(qs_b[g1["joints"][n]]) for n in fingers]
+        ex.diag_qt = list(fin_t)
         rig.finger_params = finger_readback(rig.solver, rig.model, g1, SIDE, overdrive_m=1.25 * T.SQUEEZE[KNOB] / kp_f)
         ex.setup_strokes(ys_b, ok_b, yaw0, first)
         rig.variant_extra.update(
@@ -556,6 +591,8 @@ def main(argv=None):
     except StopRun:
         pass
     paths = rig.rec.save("rollout", force_keys=["pads_N", "robot_object_contact_N"])
+    if ex.diag is not None:
+        Path(rig.out_dir, "g1_jaw_trace.jsonl").write_text("\n".join(json.dumps(r) for r in ex.diag))
     return T.verdict(rig, h, g, ex, DIAL, KNOB, TARGET_DEG, key, choice, paths, a.seed, start)
 
 

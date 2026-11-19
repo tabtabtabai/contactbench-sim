@@ -261,7 +261,13 @@ def setup(a, name):
     return rig, S, P, F, tcp0
 
 
+def _refuse_force_grip():
+    from force_bench.g1 import robot as _r
+    if _r.FINGER_COMMAND == "force":       # not implemented for this row: never run a mixed grip model
+        raise SystemExit("G1_FINGER_COMMAND=force is not implemented for this row yet")
+
 def main(argv=None):
+    _refuse_force_grip()
     a = parse(argv)
     name = a.name or NAME
     rig, S, P, F, tcp0 = setup(a, name)

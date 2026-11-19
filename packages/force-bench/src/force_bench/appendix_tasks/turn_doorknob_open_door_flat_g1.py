@@ -51,6 +51,7 @@ FINGER_OPEN, FINGER_CLOSE = -0.02, 0.0          # Dex1 finger joints: -0.02 = 83
 # the close is a grip-face half-gap of 21.5 mm (the box model's face at joint 0): on mesh fingers the same half-gap
 # from the pad plates' measured face (robot.DEX1_HALF_GAP0), so the overdrive past the knob (the squeeze) is the same
 from force_bench.g1.robot import DEX1_HALF_GAP0 as _HG0, DEX1_HALF_GAP0_BOX as _HG0_BOX
+from force_bench.g1 import robot as G1R
 FINGER_CLOSE = FINGER_CLOSE + (_HG0 - _HG0_BOX)
 FINGER_CLOSE_BAR = 0.0245                       # fully closed: the lever's bar is far thinner than 43 mm (at 0.0 the
 #                                                 pads never pinched it: one pushed it, 6 N, the other 0 N); the
@@ -264,6 +265,8 @@ def main(argv=None):
         for n, v in zip(arm_names, q):
             qt[tq_index[n]] = v
         f = (FINGER_CLOSE_BAR if a.part == "handle" else FINGER_CLOSE) if close else FINGER_OPEN
+        if close and G1R.FINGER_COMMAND == "force":       # the variant's grip-force close (robot.force_grip_target)
+            f = G1R.force_grip_target(kp_fing)
         for n in fingers:
             qt[tq_index[n]] = f
         rig.control.joint_target_q.assign(qt)
@@ -272,6 +275,7 @@ def main(argv=None):
         rig.control.joint_f.assign(jf)
 
     rig.torque_monitor = TorqueMonitor(rig.model, g1, arm_names, tq_index)
+    kp_fing = float(rig.model.joint_target_ke.numpy()[int(rig.model.joint_qd_start.numpy()[g1["joints"][fingers[0]]])])
 
     def extra(state, t):
         rig.torque_monitor.sample(state, rig.control, t, st["phase"])

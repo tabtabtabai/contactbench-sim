@@ -60,7 +60,13 @@ def parse(argv=None):
     return ap.parse_args(argv)
 
 
+def _refuse_force_grip():
+    from force_bench.g1 import robot as _r
+    if _r.FINGER_COMMAND == "force":       # not implemented for this row: never run a mixed grip model
+        raise SystemExit("G1_FINGER_COMMAND=force is not implemented for this row yet")
+
 def main(argv=None):
+    _refuse_force_grip()
     a = parse(argv)
     bake_yaw = (MATE_YAW_DEG + (SN.Z_START - MATE_ZC) / LEAD * 360.0) % 360.0
     rig = appendix_rig(a.name or NAME)

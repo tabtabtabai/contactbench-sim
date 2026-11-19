@@ -58,11 +58,27 @@ FINGER_HULLS = os.environ.get("G1_FINGER_HULLS", "")
 FINGER_COLLISION_MODEL: dict = {}        # filled by add_g1 in "mesh" mode (method, pieces, deviation, sources)
 if FINGER_COLLISION not in ("box", "mesh"):
     raise ValueError(f"G1_FINGER_COLLISION={FINGER_COLLISION!r}: box or mesh")
+# How a grip is commanded: "position" (the rows' finger joint targets, clipped to the joint travel: the published
+# sets) or "force" (the Dex1's grip-force setting: a close puts the target past any contact, at the travel's end plus
+# 1.25 x set force / kp, so the effort cap -- the set force -- binds wherever the jaws meet the part; the joint limit
+# stays the physical stop).  A variant: every task run under it commands its grips this way.
+FINGER_COMMAND = os.environ.get("G1_FINGER_COMMAND", "position")
+if FINGER_COMMAND not in ("position", "force"):
+    raise ValueError(f"G1_FINGER_COMMAND={FINGER_COMMAND!r}: position or force")
+DEX1_Q_CLOSED = 0.0245                    # the finger joints' closed end of travel (limit_upper)
+
+
+def force_grip_target(kp: float, set_force: float | None = None) -> float:
+    """Force-commanded close: the finger target 1.25 x set_force / kp past the closed end of travel, so the PD
+    saturates at its effort cap (= the set force) at any contact inside the travel."""
+    return DEX1_Q_CLOSED + 1.25 * float(FINGER_EFFORT if set_force is None else set_force) / float(kp)
 
 
 def robot_name() -> str:
-    """The record's robot: mesh-finger episodes are a different embodiment model and must not pool with box ones."""
-    return "Unitree G1 + Dex1 (mesh fingers)" if FINGER_COLLISION == "mesh" else "Unitree G1 + Dex1"
+    """The record's robot: each finger model / grip command is its own embodiment and must not pool with another."""
+    tags = (["mesh fingers"] if FINGER_COLLISION == "mesh" else []) + (["force grip"] if FINGER_COMMAND == "force"
+                                                                        else [])
+    return "Unitree G1 + Dex1" + (f" ({', '.join(tags)})" if tags else "")
 
 
 def _load_hulls(npz_path) -> dict:
@@ -392,6 +408,16 @@ def variant_params() -> dict:
                              if FINGER_COLLISION == "mesh" else
                              "a box per Dex1 finger link fitted to its collision mesh (MuJoCo collides meshes as hulls)"),
         **({"finger_collision_model": dict(FINGER_COLLISION_MODEL)} if FINGER_COLLISION == "mesh" else {}),
+        **({"finger_command": (f"grip-force: set {FINGER_EFFORT:g} N (Dex1 rated 5-120 N); position target past "
+                               "contact so the effort cap binds; joint limits unchanged"),
+            "finger_command_source": ("the Dex1 is commanded by a grip-force setting (its rated 5-120 N), not a "
+                                      "finger position: on a thin part it closes until the set force is reached, "
+                                      "wherever that is inside its travel"),
+            "finger_command_why": ("on the mesh geometry a position target at the joint limit leaves 4.5 mm of "
+                                   "overdrive on the dial's 10 mm bar, about 36 N at the Dex1's 8000 N/m instead of "
+                                   "the set 70 N"),
+            "finger_command_target": "joint limit_upper 0.0245 m + 1.25 x set force / kp"}
+           if FINGER_COMMAND == "force" else {"finger_command": "position (the rows' finger joint targets)"}),
         "setup": "matrix's MuJoCo port of the Isaac G1 + Dex1 tasks: pelvis 0.793 m on straight legs, table top "
                  "0.8703 m (Isaac 0.8373 + the 3.3 cm pelvis difference), the ColorArrangement reset pose (both arms, "
                  "waist), the idle arm holding it",
