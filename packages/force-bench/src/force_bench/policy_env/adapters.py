@@ -861,7 +861,7 @@ ADAPTERS = {"turn_doorknob_open_door_flat": DoorAdapter, "turn_door_handle_open_
             # the G1 + Dex1 rows (embodiment variant): the same adapters on the G1's pad probes
             "turn_doorknob_open_door_flat_g1": DoorAdapter, "turn_door_handle_open_door_flat_g1": DoorAdapter,
             "install_light_bulb_g1": BulbAdapter, "turn_dial_to_target_g1": DialAdapter,
-            "screw_nut_onto_screw_g1": NutAdapter}
+            "screw_nut_onto_screw_g1": NutAdapter, "turn_dial_g1_expert": DialAdapter}
 
 
 def adapter_for(module: str):
