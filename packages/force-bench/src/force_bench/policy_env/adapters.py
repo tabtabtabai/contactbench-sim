@@ -29,6 +29,7 @@ from force_bench.policy_env.episode import closure
 
 GRIP_N, GRIP_FRAMES = 2.0, 3        # the door row's pads_check gate (2 N in every 3-frame window)
 BACKOUT_DEG = 30.0
+ENVELOPE_SQUEEZE_LIMIT_N = 25.0     # bulb glass, report-only and provisional (unmeasured)
 FORCE_LIMIT_N = 150.0
 # How long a finger must stay above FORCE_LIMIT_N for force_limit to fire. 4 consecutive frames (67 ms at 60 Hz) is
 # the rule every FR3 run used; 1 is "any single frame". An explicit setting (TB_FORCE_LIMIT_FRAMES) until the contract
@@ -528,8 +529,15 @@ class BulbAdapter(Adapter):
                                       "window_s": [round(t_from, 2), round(float(t[-1]), 2)],
                                       "upstream": "identical threshold; window from the judge phase's start"}
         finite = bool(np.isfinite(L).all())
+        # report-only, provisional: how hard the fingers squeeze the glass.  The kit bulb is one body gripped by its
+        # globe (the FR3 and G1 experts both pinch the envelope), so the per-finger force on the bulb is the force on
+        # the envelope.  25 N is unmeasured (2.5x the observed peak); it flags, it never fails or scores.
+        env = float(np.maximum(C["fL"], C["fR"]).max()) if len(t) else 0.0
+        qa = {"max_envelope_finger_force_N": round(env, 2), "envelope_squeeze_limit_N": ENVELOPE_SQUEEZE_LIMIT_N,
+              "envelope_squeeze_limit_note": "provisional: unmeasured; 2.5x the observed peak",
+              "flags": ["max_envelope_finger_force_N"] if env > ENVELOPE_SQUEEZE_LIMIT_N else []}
         return {"pass": bool(all(v["pass"] for v in crit.values()) and finite), "criteria": crit, "finite": finite,
-                "t_end_s": round(float(t[-1]), 3)}
+                "t_end_s": round(float(t[-1]), 3), "physics_qa": qa}
 
     def _tight_index(self, C, i_s):
         """First frame at which the row's tightness condition completes, sampled as the row's expert samples it: the
