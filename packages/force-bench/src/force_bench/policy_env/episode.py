@@ -344,14 +344,30 @@ def run_row(task: str, seed, driver, *, budget_s: float, out_dir: Path, with_ups
         # the expert runs to its own ending (StopRun) or the row's own duration, never cut short by the online
         # success signal: the row's verdict windows are laid out on the expert's timeline
         limit = float(duration) * getattr(driver, "duration_scale", 1.0) if driver.expert else float(budget_s)
+        # a policy's post-success window (CONTRACT: success, then 30 s): when the success check first holds the
+        # episode runs on with the policy in control; the verdict is the end state (success_final)
+        post = 0.0 if driver.expert else float(getattr(driver, "post_success_s", 0.0) or 0.0)
+        ep.success_t, ep.success_final, ep.post_success_s, post_until = None, None, None, None
         try:
             while not ep.done:
-                if ep.robot_t >= limit - 1e-9:
+                if ep.robot_t >= limit - 1e-9 and post_until is None:
                     ep.end("duration" if driver.expert else "budget")
                     break
+                if post_until is not None and ep.robot_t >= post_until - 1e-9:
+                    ep.success_final = bool(ep.adapter.success_online)
+                    ep.end("post_success")
+                    break
                 driver.advance(ep)       # one or more frames (a real-time request steps the world while it waits)
-                if not driver.expert:
-                    ep.adapter.check_end()
+                if not driver.expert and not ep.done:
+                    if post > 0 and post_until is None and ep.adapter.success_online:
+                        # the first success: latch its time; the window runs on with the policy in control (the
+                        # row's own success / release endings are suspended until it closes)
+                        ep.success_t, ep.post_success_s = ep.robot_t, post
+                        post_until = ep.robot_t + post
+                    elif post_until is None:
+                        ep.adapter.check_end()
+                if ep.done and post_until is not None and ep.success_final is None:
+                    ep.success_final = False     # an irreversible event or a policy error inside the window
         except StopRun:
             ep.end("expert_finished")
         ep.adapter.judge_phase()

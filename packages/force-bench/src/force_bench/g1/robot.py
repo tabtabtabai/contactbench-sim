@@ -409,7 +409,8 @@ class ContactPeak:
 # or npz (the exported MuJoCo cameras, the earlier records).  Poses are ROS optical frames (x right, y down, z forward)
 # in the parent link, as IsaacLab's OffsetCfg(convention="ros"); (w, x, y, z).
 SPEC_CAMERAS = {
-    "head": {"body": "d435_link", "pos": (0.0, 0.0, 0.0), "ros_q": (0.4912, -0.50865, 0.50865, -0.4912),
+    "head": {"body": "d435_link", "pos": (0.0, 0.0, 0.0), "right_eye_pos": (0.0, -0.05, 0.0),
+             "ros_q": (0.4912, -0.50865, 0.50865, -0.4912),
              "fx_px": 243.2, "size": (640, 480),
              "source": "spec 5.2 + 8: the left eye front_camera at the d435_link origin, the harness's stock focal 7.6 "
                        "mm (fx 243.2 at 640 px) and its 2 deg tilt; d435_link matches the spec's fixed joint"},
@@ -437,8 +438,15 @@ def camera_mounts(npz_path, side: str) -> list:
     """The G1's own cameras from the exported model, as PolicyCameras mounts [(name, body label, T_body_cam, fovy)]:
     the head camera (the d435 mount, Isaac's g1_front_camera; the left of the challenge's head pair) and the active
     hand's wrist camera.  MuJoCo cameras look along -z with +y up, the GL convention the renderer uses."""
-    if G1_CAMERAS == "spec":
-        return [_spec_mount("head", side), _spec_mount("wrist", side)]
+    if G1_CAMERAS == "spec" and os.environ.get("G1_CAMERA_SET", "expert") != "isaac":
+        return [_spec_mount("head", side), _spec_mount("wrist", side)]    # the expert proofs' two (head, active wrist)
+    if G1_CAMERAS == "spec":    # a policy run: the Isaac tasks' four policy cameras (head stereo, both wrists)
+        right_eye = _spec_mount("head", side)
+        T = right_eye[2].copy()
+        T[:3, 3] = SPEC_CAMERAS["head"]["right_eye_pos"]
+        lw, rw = _spec_mount("wrist", "left"), _spec_mount("wrist", "right")
+        return [_spec_mount("head", side), ("head_right", right_eye[1], T, right_eye[3]),
+                ("left_wrist", lw[1], lw[2], lw[3]), ("right_wrist", rw[1], rw[2], rw[3])]
     d = np.load(npz_path, allow_pickle=False)
     if "cam_name" not in d:
         return []
