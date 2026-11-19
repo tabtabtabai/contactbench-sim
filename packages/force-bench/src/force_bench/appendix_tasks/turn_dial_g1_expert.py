@@ -156,6 +156,19 @@ class G1DialExpert(T.Expert):
     diag = None                       # G1_DIAG_TRACE=1: per frame the jaw state against the bar (for diagnosis)
     diag_hand = None
 
+    diag_contact_shapes = None      # G1_DIAG_CONTACTS=1: ({jaw k: finger shapes}, knob shapes) for contact_log
+
+    def _diag_contacts(self, state):
+        if self.diag_contact_shapes is None:
+            return {}
+        jaws, knob_sh = self.diag_contact_shapes
+        out, cnt = {}, {}
+        for k, sh in jaws.items():
+            cs = G1R.contact_log(self.rig.model, self.rig.contacts, state, sh, knob_sh)
+            out[f"contacts_jaw{k}"] = cs
+            cnt[f"jaw{k}"] = len(cs)
+        return {"contact_count": cnt, **out}
+
     def _diag_arm(self, state):
         """The arm's joint torques this frame (TorqueMonitor's estimate) and the hand's velocity."""
         tm = self.rig.torque_monitor
@@ -191,7 +204,7 @@ class G1DialExpert(T.Expert):
                               "axis_off_jaw_centre_mm": round(1e3 * off, 3),
                               "jaw_centre_xy_from_axis_mm": [round(1e3 * float(c[i] - self.axis[i]), 3) for i in (0, 1)],
                               "tip_gap_mm": round(1e3 * float(np.linalg.norm(p2 - p1)), 3), **lk,
-                              **self._diag_arm(state)})
+                              **self._diag_arm(state), **self._diag_contacts(state)})
         return super().extra(state, t)
 
 
@@ -598,6 +611,13 @@ def main(argv=None):
         ex.diag_q = [int(qs_b[g1["joints"][n]]) for n in fingers]
         ex.diag_qt = list(fin_t)
         ex.diag_hand = g1["bodies"][f"{SIDE}_hand_base_link"]
+        if os.environ.get("G1_DIAG_CONTACTS") == "1":
+            sb_ = rig.model.shape_body.numpy()
+            blab = [str(x) for x in rig.model.body_label]
+            jaws = {k: [i for i in range(rig.model.shape_count) if sb_[i] >= 0 and blab[sb_[i]] in
+                        (f"{PREFIX}{SIDE}_hand_Link{k}_2", f"{PREFIX}{SIDE}_hand_Link{k}_3")] for k in (1, 2)}
+            lbl_ = [str(x or "") for x in rig.model.shape_label]
+            ex.diag_contact_shapes = (jaws, [lbl_.index(x) for x in knob_shapes])
         rig.finger_params = finger_readback(rig.solver, rig.model, g1, SIDE, overdrive_m=1.25 * T.SQUEEZE[KNOB] / kp_f)
         ex.setup_strokes(ys_b, ok_b, yaw0, first)
         rig.variant_extra.update(

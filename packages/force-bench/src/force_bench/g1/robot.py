@@ -136,6 +136,11 @@ def _load_hulls(npz_path) -> dict:
     return {b: [(v, f) for _, v, f in sorted(p, key=lambda t: t[0])] for b, p in out.items()}
 
 
+def _quat_xyzw_np(R) -> list:
+    from force_bench.policy_env.cameras import _quat_xyzw
+    return [float(v) for v in _quat_xyzw(R)]
+
+
 def _xf(pos, quat_wxyz) -> wp.transform:
     w, x, y, z = (float(v) for v in quat_wxyz)
     return wp.transform(wp.vec3(*[float(v) for v in pos]), wp.quat(x, y, z, w))
@@ -152,9 +157,12 @@ PAD_MU = float(os.environ.get("G1_PAD_MU", 1.0))   # matrix's MuJoCo Dex1 contac
 
 
 def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, mu: float = PAD_MU,
-           arm_kp_scale: float = ARM_KP_SCALE) -> dict:
+           arm_kp_scale: float = ARM_KP_SCALE, hand_only: tuple | None = None) -> dict:
     """Returns {"bodies": {mujoco name: newton body}, "joints": {mujoco joint name: newton joint},
-    "q_index": {joint name: joint_q index}, "shapes": {body name: [shape ids]}}."""
+    "q_index": {joint name: joint_q index}, "shapes": {body name: [shape ids]}}.
+
+    ``hand_only=(root body name, 4x4 world pose)``: build only that body's subtree (a Dex1 hand: its base and
+    fingers), the root welded to the world at the pose: the hand without the arm (a diagnosis rig)."""
     d = np.load(npz_path, allow_pickle=False)
     names = [str(n) for n in d["body_name"]]
     parent = d["body_parent"]
@@ -174,9 +182,23 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
         T = np.eye(4)
         T[:3, :3], T[:3, 3] = _rot(d["body_quat"][b]), d["body_pos"][b]
         Xw[b] = (base @ T) if parent[b] == 0 else Xw[parent[b]] @ T
+    keep = set(range(1, len(names)))
+    if hand_only is not None:
+        r0 = names.index(hand_only[0])
+        keep = {r0}
+        for b in range(1, len(names)):          # MuJoCo lists parents before children
+            if int(parent[b]) in keep:
+                keep.add(b)
+        Xw[r0] = np.asarray(hand_only[1], float)
+        for b in sorted(keep - {r0}):
+            T = np.eye(4)
+            T[:3, :3], T[:3, 3] = _rot(d["body_quat"][b]), d["body_pos"][b]
+            Xw[b] = Xw[int(parent[b])] @ T
     out = {"bodies": {}, "joints": {}, "q_index": {}, "shapes": {}, "colors": {}}
     joints = []
     for b in range(1, len(names)):
+        if b not in keep:
+            continue
         R = _rot(d["body_iquat"][b])
         I = R @ np.diag(d["body_inertia"][b]) @ R.T
         X = Xw[b]
@@ -186,8 +208,12 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
                               com=wp.vec3(*d["body_ipos"][b]), inertia=wp.mat33(*I.ravel()),
                               mass=float(max(d["body_mass"][b], 1e-4)), label=PREFIX + names[b])
         out["bodies"][names[b]] = nb
-        pb = -1 if parent[b] == 0 else out["bodies"][names[parent[b]]]
+        pb = -1 if parent[b] == 0 else out["bodies"].get(names[parent[b]], -1)
         rel = _xf(d["body_pos"][b], d["body_quat"][b]) if parent[b] != 0 else pelvis_xform
+        if hand_only is not None and b == r0:   # the hand's root, welded to the world at the given pose
+            pb = -1
+            Xr = Xw[r0]
+            rel = wp.transform(wp.vec3(*Xr[:3, 3]), wp.quat(*_quat_xyzw_np(Xr[:3, :3])))
         if b in jnt_of:
             j = jnt_of[b]
             jn = str(d["jnt_name"][j])
@@ -799,6 +825,53 @@ class MagnitudeProbe:
                 rec["force_full"] = float(np.linalg.norm(fv, axis=1).sum())
         self.history.append(rec)
         return rec
+
+
+def contact_log(model, contacts, state, mine_shapes, other_shapes) -> list:
+    """Every contact between a shape in ``mine_shapes`` and one in ``other_shapes`` this frame (diagnosis): world
+    points on both shapes, the normal (shape 0 -> 1), the solver's force on the contact split into normal and
+    tangential, the separation along the normal less both margins (negative = penetration) and the shape pair."""
+    f = getattr(contacts, "force", None)
+    n = int(contacts.rigid_contact_count.numpy()[0]) if f is not None else 0
+    if n <= 0:
+        return []
+    n = min(n, len(contacts.rigid_contact_shape0))
+    s0 = contacts.rigid_contact_shape0.numpy()[:n].astype(int)
+    s1 = contacts.rigid_contact_shape1.numpy()[:n].astype(int)
+    mine, other = np.zeros(model.shape_count, bool), np.zeros(model.shape_count, bool)
+    mine[list(mine_shapes)] = True
+    other[list(other_shapes)] = True
+    ok = (s0 >= 0) & (s1 >= 0)
+    a, b = np.clip(s0, 0, None), np.clip(s1, 0, None)
+    sel = np.flatnonzero(ok & ((mine[a] & other[b]) | (mine[b] & other[a])))
+    if not len(sel):
+        return []
+    labels = [str(x or "") for x in model.shape_label]
+    sb = model.shape_body.numpy()
+    bq = state.body_q.numpy()
+    p0 = contacts.rigid_contact_point0.numpy()[:n]
+    p1 = contacts.rigid_contact_point1.numpy()[:n]
+    nn = contacts.rigid_contact_normal.numpy()[:n]
+    m0 = contacts.rigid_contact_margin0.numpy()[:n]
+    m1 = contacts.rigid_contact_margin1.numpy()[:n]
+    fv = f.numpy()[:n]
+
+    def world(sh, p):
+        bi = int(sb[sh])
+        return (bq[bi, :3] + _qrot(bq[bi, 3:7], p)) if bi >= 0 else np.asarray(p, float)
+    out = []
+    for i in sel:
+        w0, w1 = world(int(s0[i]), p0[i].astype(float)), world(int(s1[i]), p1[i].astype(float))
+        nv = nn[i, :3].astype(float)
+        F = fv[i, :3].astype(float)
+        fn = float(F @ nv)
+        ft = F - fn * nv
+        out.append({"pair": [labels[int(s0[i])], labels[int(s1[i])]], "p0": [round(float(v), 5) for v in w0],
+                    "p1": [round(float(v), 5) for v in w1], "n": [round(float(v), 4) for v in nv],
+                    "f_normal_N": round(abs(fn), 3), "f_tan_N": [round(float(v), 3) for v in ft],
+                    "f_full_N": round(float(np.linalg.norm(F)), 3),
+                    "sep_mm": round(1e3 * (float(nv @ (w1 - w0)) - float(m0[i]) - float(m1[i])), 4)})
+    return out
 
 
 def add_rule_a_probes(rig, side: str, net_probes=None) -> tuple:
