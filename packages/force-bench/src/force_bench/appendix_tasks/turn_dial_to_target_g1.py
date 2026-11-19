@@ -30,8 +30,9 @@ import warp as wp
 from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, appendix_rig, sample_start
 from force_bench.appendix_tasks.turn_dial_to_target import (DIAL_KEYS, DIAL_PLACE, IMPRATIO, ITERS, KNOB_LABELS,
                                                             SUBSTEPS, T_STILL)
-from force_bench.g1.robot import (ContactPeak, SumProbe, add_g1, apply_look, camera_mounts, floor_and_table,
-                                  init_pose, q_indices)
+from force_bench.g1.robot import (ContactPeak, SumProbe, TorqueMonitor, add_g1, apply_look, camera_mounts,
+                                  cap_headroom, effective_arm_caps, floor_and_table, init_pose, q_indices,
+                                  sim_cap_readback)
 from force_bench.kit import add_asset, place_on_table
 from force_bench.kit.mechanisms import dial as D
 from force_bench.rig import make_solver
@@ -55,7 +56,11 @@ class G1DialLog:
         self.target, self.dial = float(target_rad), "standard"
         self.log = []
 
+    torque_monitor = None
+
     def extra(self, state, t):
+        if self.torque_monitor is not None:
+            self.torque_monitor.sample(state, self.rig.control, t)
         ang, press = D.knob_coords(self.rig, self.h, state)
         fl = self.p["finL"].history[-1]["force"] if self.p["finL"].history else 0.0
         fr = self.p["finR"].history[-1]["force"] if self.p["finR"].history else 0.0
@@ -189,6 +194,15 @@ def main(argv=None):
     pelvis = wp.transform(wp.vec3(*traj["pelvis_cb"]), wp.quat_identity())
     g1 = add_g1(rig.builder, a.model, pelvis)
     rig.robot_base = pelvis
+    # actuator + gravity feed-forward within the G1's torque limits: the feed-forward's peak over every plan table
+    nj = len(traj["arm_joints"])
+    tabs = [traj.get("tau_g") or [], traj.get("retreat_tau_g") or []]
+    for sk in traj.get("strokes") or []:
+        tabs += [sk.get("tau_g") or [], sk["turn_table"].get("tau_g") or [], sk.get("up_tau_g") or []]
+    if "turn_table" in traj:
+        tabs.append(traj["turn_table"].get("tau_g") or [])
+    ff = np.abs(np.concatenate([np.asarray(x, float).reshape(-1, nj) for x in tabs if len(x)]))
+    rig.effort_budget = cap_headroom(rig.builder, g1, traj["arm_joints"], ff.max(axis=0))
     px = float(traj["pelvis_cb"][0])
     rig.table(center_xy=(px + 0.12 + 0.35, float(start[1])), half=0.35)
     if "floor_cb" in traj:                       # the G1 on its floor, a solid table under the board (Isaac setup)
@@ -200,6 +214,8 @@ def main(argv=None):
     shift = np.array([start[0], start[1], 0.0])
     rig.finalize(probes=[f"{h.label}/knob"], cam_pos=CAM_POS + shift, cam_target=CAM_TARGET + shift)
     rig.solver = make_solver(rig.model, iterations=ITERS, impratio=IMPRATIO)
+    rig.arm_caps_sim = sim_cap_readback(rig.solver, g1, rig.effort_budget)   # what the simulator clamps to
+    rig.arm_caps = effective_arm_caps(rig.model, g1)
     labels = [str(lbl) for lbl in rig.model.shape_label]
     knob_shapes = [lbl for lbl in labels if lbl.startswith(f"kit/{h.label}/") and "knob" in lbl]
     static_labels = [lbl for lbl in labels if lbl.startswith(f"kit/{h.label}/")
@@ -222,6 +238,8 @@ def main(argv=None):
     fingers = [f"{side}_dex1_finger_joint_1", f"{side}_dex1_finger_joint_2"]
     tq_index = {n: int(tqs[g1["joints"][n]]) for n in [*arm_names, *fingers]}
     f_index = [int(qds[g1["joints"][n]]) for n in arm_names]
+    rig.torque_monitor = TorqueMonitor(rig.model, g1, arm_names, tq_index)
+    lg.torque_monitor = rig.torque_monitor
     way = (traj["waypoints"] if "waypoints" in traj else traj["strokes"][0]["waypoints"])[
         :traj.get("i_close", traj["strokes"][0]["i_close"] if "strokes" in traj else 0) + 1]
     ts = np.array([w[0] for w in way]) + PRE_HOLD
