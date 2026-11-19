@@ -125,6 +125,21 @@ def _render_version(rig) -> int:
     return render_version(rig) if rig is not None else render_version()
 
 
+CONTACT_LOG = "contact_log.json.gz"
+
+
+def split_contact_log(summary: dict, folder: Path):
+    """The contact-peak summary for episode.json (peak, peak_normal, log_above_N, frames_above) and its per-frame log
+    (frames_above_logged, up to MBs on a long grip) to a gzipped sidecar in the episode folder.  Returns
+    (summary without the log, the sidecar's name)."""
+    import gzip
+    s = dict(summary)
+    log = s.pop("frames_above_logged", None)
+    with gzip.open(Path(folder) / CONTACT_LOG, "wt") as f:
+        json.dump({"log_above_N": s.get("log_above_N"), "frames_above_logged": log or []}, f)
+    return s, CONTACT_LOG
+
+
 def reach_miss_record(test: str, seed, policy_id: str, ctx: dict, err: BaseException, budget, folder: Path,
                       bench: str, sim: str) -> dict:
     """A reach miss as a full contract record: no episode ran (done_reason reach_miss, zero times), the judge's one
@@ -330,5 +345,5 @@ def extras(rec: dict, res: dict, folder: Path, test: str, seed, ctx: dict) -> di
         rec["success_detail"] = (f"FLAGGED: the judge's criteria pass, but physics_qa flags {hit} stand (a flagged pass "
                                  "does not count); " + rec["success_detail"])
     if cp is not None:
-        rec["peak_contact"] = cp.summary()
+        rec["peak_contact"], rec["peak_contact_log"] = split_contact_log(cp.summary(), folder)
     return rec
