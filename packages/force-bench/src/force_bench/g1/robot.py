@@ -50,6 +50,51 @@ def arm_cap(joint_name: str) -> float | None:
             return v
     return None
 COLLIDE_BODIES = ("hand_Link1_2", "hand_Link1_3", "hand_Link2_2", "hand_Link2_3")
+# How the Dex1 finger links collide: "box" (one box per link fitted to its collision mesh's body-frame bounds: the
+# published G1 sets) or "mesh" (a CoACD convex decomposition of each link's collision mesh, from G1_FINGER_HULLS:
+# a file written by force_bench.g1.finger_hulls).  Contact parameters (mu, solref/solimp, margins) are the same.
+FINGER_COLLISION = os.environ.get("G1_FINGER_COLLISION", "box")
+FINGER_HULLS = os.environ.get("G1_FINGER_HULLS", "")
+FINGER_COLLISION_MODEL: dict = {}        # filled by add_g1 in "mesh" mode (method, pieces, deviation, sources)
+if FINGER_COLLISION not in ("box", "mesh"):
+    raise ValueError(f"G1_FINGER_COLLISION={FINGER_COLLISION!r}: box or mesh")
+
+
+def robot_name() -> str:
+    """The record's robot: mesh-finger episodes are a different embodiment model and must not pool with box ones."""
+    return "Unitree G1 + Dex1 (mesh fingers)" if FINGER_COLLISION == "mesh" else "Unitree G1 + Dex1"
+
+
+def _load_hulls(npz_path) -> dict:
+    """{body name: [(V, F)]} from G1_FINGER_HULLS, checked against the model it was decomposed from."""
+    import hashlib
+    if not FINGER_HULLS:
+        raise ValueError("G1_FINGER_COLLISION=mesh needs G1_FINGER_HULLS (force_bench.g1.finger_hulls output)")
+    H = np.load(FINGER_HULLS, allow_pickle=False)
+    meta = json.loads(str(H["meta"]))
+    model_sha = hashlib.sha256(open(npz_path, "rb").read()).hexdigest()
+    if meta.get("model_sha256") != model_sha:
+        raise ValueError(f"{FINGER_HULLS} was decomposed from model {meta.get('model_sha256')}, not {model_sha}")
+    out = {}
+    for k in H.files:
+        if k.endswith("/v"):
+            body, i, _ = k.rsplit("/", 2)
+            out.setdefault(body, []).append((int(i), H[k].astype(np.float32), H[f"{body}/{i}/f"].astype(np.int32)))
+    links = meta["links"]
+    FINGER_COLLISION_MODEL.clear()
+    FINGER_COLLISION_MODEL.update({
+        "method": f"CoACD {meta['coacd_version']} convex decomposition (threshold {meta['threshold']}, seed "
+                  f"{meta['seed']}) of each Dex1 finger link's collision mesh, one convex hull shape per piece",
+        "hulls_file_sha256": hashlib.sha256(open(FINGER_HULLS, "rb").read()).hexdigest(),
+        "source_mesh": f"g1_dex1_model.npz (sha256 {model_sha}): the finger links' MuJoCo collision meshes "
+                       "(geom_collide), from matrix sims/mujoco's G1 + Dex1 export",
+        "pieces": {b: v["pieces"] for b, v in links.items()},
+        "max_hull_off_mesh_mm": max(v["hull_off_mesh_max_mm"] for v in links.values()),
+        "max_mesh_outside_hulls_mm": max(v["mesh_outside_hulls_max_mm"] for v in links.values()),
+        "per_link": links,
+        "contact_parameters": "unchanged from the box model (mu, solref/solimp, margins, finger drive)",
+    })
+    return {b: [(v, f) for _, v, f in sorted(p, key=lambda t: t[0])] for b, p in out.items()}
 
 
 def _xf(pos, quat_wxyz) -> wp.transform:
@@ -76,6 +121,7 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
     parent = d["body_parent"]
     drives = json.loads(str(d["drive_json"]))
     jnt_of = {int(b): j for j, b in enumerate(d["jnt_body"])}
+    hulls = _load_hulls(npz_path) if FINGER_COLLISION == "mesh" else {}
     # world poses by forward composition (MuJoCo body_pos/quat are relative to the parent)
     Xw = {0: np.eye(4)}
     root = 1
@@ -150,7 +196,13 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
                                              label=f"{PREFIX}{names[b]}_vis{g}")
                 sids.append(sid)
                 out["colors"][sid] = [float(c) for c in rgba[:3]]
-        if collide and verts_body:
+        if collide and verts_body and FINGER_COLLISION == "mesh":
+            cfg = newton.ModelBuilder.ShapeConfig(mu=mu, density=0.0, is_visible=False)
+            for i, (hv, hf) in enumerate(hulls[names[b]]):
+                sids.append(builder.add_shape_convex_hull(nb, xform=wp.transform_identity(),
+                                                          mesh=newton.Mesh(hv, hf.ravel()), cfg=cfg,
+                                                          label=f"{PREFIX}{names[b]}_hull{i}"))
+        elif collide and verts_body:
             V = np.vstack(verts_body)
             lo, hi = V.min(0), V.max(0)
             c = 0.5 * (lo + hi)
@@ -292,6 +344,8 @@ def variant_params() -> dict:
     the episode record (``robot_variant_params``).  Published episodes must stay inside the real Dex1's ratings."""
     if not DEX1_RATED_GRIP_N[0] <= FINGER_EFFORT <= DEX1_RATED_GRIP_N[1]:
         raise ValueError(f"squeeze {FINGER_EFFORT} N is outside the Dex1's rated {DEX1_RATED_GRIP_N} N")
+    if FINGER_COLLISION == "mesh" and not FINGER_COLLISION_MODEL:
+        raise ValueError("mesh fingers: variant_params() before add_g1 loaded the hulls")
     if not 1.0 <= ARM_KP_SCALE <= ARM_KP_MAX:
         raise ValueError(f"arm kp scale {ARM_KP_SCALE} is outside 1-{ARM_KP_MAX:g}x matrix's")
     return {
@@ -313,7 +367,10 @@ def variant_params() -> dict:
         "gravity_feedforward": True,
         "gravity_source": "the arm's gravity torques from the same MuJoCo model, fed forward (the whole-body "
                           "controller's gravity compensation)",
-        "finger_collision": "a box per Dex1 finger link fitted to its collision mesh (MuJoCo collides meshes as hulls)",
+        "finger_collision": ("a CoACD convex decomposition of each Dex1 finger link's collision mesh (mesh fingers)"
+                             if FINGER_COLLISION == "mesh" else
+                             "a box per Dex1 finger link fitted to its collision mesh (MuJoCo collides meshes as hulls)"),
+        **({"finger_collision_model": dict(FINGER_COLLISION_MODEL)} if FINGER_COLLISION == "mesh" else {}),
         "setup": "matrix's MuJoCo port of the Isaac G1 + Dex1 tasks: pelvis 0.793 m on straight legs, table top "
                  "0.8703 m (Isaac 0.8373 + the 3.3 cm pelvis difference), the ColorArrangement reset pose (both arms, "
                  "waist), the idle arm holding it",
