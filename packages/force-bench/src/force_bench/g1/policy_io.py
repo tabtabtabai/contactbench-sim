@@ -99,6 +99,15 @@ class G1IO:
             tq[self.fin_d[side]] = q_of_raw(g)
         control.joint_target_q.assign(tq)
 
+    def target_row(self, control) -> dict:
+        """The targets the robot is driven to now, as an action row (records a scripted expert for replay)."""
+        tq = control.joint_target_q.numpy()
+        out = {}
+        for side in ("left", "right"):
+            out[f"action.{side}_arm"] = tq[self.arm_d[side]].astype(np.float32)
+            out[f"action.{side}_gripper"] = np.array([raw_of_q(float(np.mean(tq[self.fin_d[side]])))], np.float32)
+        return out
+
     def current_row(self, state) -> dict:
         """The robot's current pose as an action row (holds it)."""
         s = self.state(state)
