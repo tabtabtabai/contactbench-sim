@@ -440,7 +440,10 @@ def variant_params() -> dict:
         "pad_mu": PAD_MU,
         "pad_mu_source": ("matrix's MuJoCo Isaac Dex1 contact friction (sims/mujoco isaac_dex1.py: 'initial contact "
                           "parameters, not an identified PhysX material equivalence'); not measured on the real pads"
-                          if PAD_MU == 1.0 else "NON-DEFAULT: a diagnostic value, not for published episodes"),
+                          if PAD_MU == 1.0 else
+                          ("NON-DEFAULT (diagnostic): 1.4, the FR3 pads' value in this benchmark (the kit's elastomer "
+                           "pads); not for published episodes" if abs(PAD_MU - 1.4) < 1e-9 else
+                           "NON-DEFAULT: a diagnostic value, not for published episodes")),
         "arm_kp_scale": ARM_KP_SCALE,
         "arm_kp_source": (f"{ARM_KP_SCALE:g}x the export's kp: 120 shoulder, 161.2 elbow and wrist, the isaac profile's "
                           "droop-calibrated gains; effort caps unchanged (25 / 5 N.m); with the gravity feed-forward "
