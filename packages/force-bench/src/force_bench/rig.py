@@ -38,6 +38,13 @@ from force_bench.qa import RolloutQA
 from force_bench.recorder import RolloutRecorder
 from force_bench.assets import load_tm, make_newton_mesh, set_body_mass
 
+# TB_TABLE=isaac: the UniBot Isaac challenge table (Rig._isaac_table); off by default
+TB_TABLE = os.environ.get("TB_TABLE", "")
+ISAAC_TABLE = {"lateral_m": 1.445, "depth_m": 0.85, "thickness_m": 0.05, "g1_near_edge_ahead_m": 0.195,
+               "fr3_base_inside_m": 0.10, "centre_right_m": 0.05, "top_above_floor_m": 0.8373, "mu": 0.5,
+               "mu_source": "Isaac's plain_table has no physics material (make_props.make_table: PhysX default ~0.5); "
+                            "ContactBench rig.cfg() mu 0.5 (checked 19 Nov)"}
+
 JD = newton.ModelBuilder.JointDofConfig
 DEFAULT_CFG = dict(ke=1.0e5, kd=1.0e3, gap=0.0008, mu_torsional=0.0, mu_rolling=0.0)
 
@@ -396,11 +403,84 @@ class Rig:
         return newton.ModelBuilder.ShapeConfig(mu=mu, density=density, **base)
 
     def table(self, center_xy=(0.0, 0.0), half=0.3):
+        if TB_TABLE == "isaac":
+            return self._isaac_table()
         sid = self.builder.add_shape_box(
             -1, xform=wp.transform(wp.vec3(center_xy[0], center_xy[1], -0.005),
                                    wp.quat_identity()),
             hx=half, hy=half, hz=0.005, cfg=self.cfg(), label="table")
         self.shapes["table"] = [sid]
+
+    def _isaac_table(self):
+        """TB_TABLE=isaac: the UniBot Isaac challenge table (unibot-scene-spec.md section 1): one slab 1.445 m
+        (the robot's lateral) x 0.85 m (depth) x 0.05 m, its top where ContactBench's table top is (z = 0), so the
+        table height relative to the robot is unchanged.  Placed from the robot: the G1's pelvis 0.195 m behind the
+        near edge (spec 1.2), the FR3's base ON the table 0.10 m inside it (no FR3 in the Isaac scenes); the table
+        centre 0.05 m to the robot's right, the depth along the robot's forward axis.  The FR3 rig's ground plane
+        (which sits at the table top) moves down to the Isaac floor, 0.8373 m below the top; the G1 rows move it to
+        their own floor (floor_and_table).  mu 0.5: Isaac's plain_table carries no physics material (PhysX default
+        0.5) and rig.cfg() is 0.5."""
+        rb = getattr(self, "robot_base", None)
+        if rb is None:
+            raise SystemExit("TB_TABLE=isaac: the robot (robot_base) must be placed before the table")
+        p = np.array([float(rb[0]), float(rb[1]), float(rb[2])])
+        q = rb[3:7] if not hasattr(rb, "q") else rb.q
+        x, y, z, w = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+        fwd = np.array([1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 0.0])
+        fwd /= max(1e-9, np.linalg.norm(fwd))
+        right = np.array([fwd[1], -fwd[0], 0.0])
+        g1 = any(str(b).startswith("g1/") for b in self.builder.body_label)
+        near = ISAAC_TABLE["g1_near_edge_ahead_m"] if g1 else -ISAAC_TABLE["fr3_base_inside_m"]
+        c = p[:2] + fwd[:2] * (near + 0.5 * ISAAC_TABLE["depth_m"]) + right[:2] * ISAAC_TABLE["centre_right_m"]
+        yaw = float(np.arctan2(fwd[1], fwd[0]))
+        quat = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), yaw)
+        th = ISAAC_TABLE["thickness_m"]
+        cfg = self.cfg(mu=ISAAC_TABLE["mu"])
+        sid = self.builder.add_shape_box(-1, xform=wp.transform(wp.vec3(float(c[0]), float(c[1]), -0.5 * th), quat),
+                                         hx=0.5 * ISAAC_TABLE["depth_m"], hy=0.5 * ISAAC_TABLE["lateral_m"],
+                                         hz=0.5 * th, cfg=cfg, label="table")
+        self.shapes["table"] = [sid]
+        floor = None
+        if not g1:
+            floor = -ISAAC_TABLE["top_above_floor_m"]
+            for i, lbl in enumerate(self.builder.shape_label):
+                if lbl and "ground" in str(lbl):
+                    X = self.builder.shape_transform[i]
+                    self.builder.shape_transform[i] = wp.transform(wp.vec3(X[0], X[1], X[2] + floor),
+                                                                   wp.quat(X[3], X[4], X[5], X[6]))
+        self.scene_table = {
+            "type": "isaac", "dims_m": {"lateral": ISAAC_TABLE["lateral_m"], "depth": ISAAC_TABLE["depth_m"],
+                                        "thickness": th},
+            "top_z_m": 0.0, "centre_xy_m": [round(float(c[0]), 4), round(float(c[1]), 4)],
+            "yaw_deg": round(float(np.degrees(yaw)), 2), "robot": "g1" if g1 else "fr3",
+            "near_edge_from_robot_m": round(near, 4), "centre_right_of_robot_m": ISAAC_TABLE["centre_right_m"],
+            "mu": ISAAC_TABLE["mu"], "mu_source": ISAAC_TABLE["mu_source"],
+            "floor_z_m": floor if floor is not None else "the G1 row's floor (floor_and_table)",
+            "source": "unibot-scene-spec.md section 1 (plain_table.usd at scale (0.85, 1, 1); the ColorArrangement "
+                      "fit: near edge 0.195 m ahead of the pelvis, centre 0.05 m to its right); the FR3 base 0.10 m "
+                      "inside the near edge (no FR3 in the Isaac scenes)"}
+        self._table_frame = (c, fwd, right)
+        return sid
+
+    def table_footprint(self) -> dict:
+        """Every non-robot body's start position against the Isaac table top (TB_TABLE=isaac): inside or not."""
+        if getattr(self, "_table_frame", None) is None or getattr(self, "model", None) is None:
+            return {}
+        c, fwd, right = self._table_frame
+        bq = self.s0.body_q.numpy()
+        out = {}
+        for b, lbl in enumerate(self.model.body_label):
+            lbl = str(lbl)
+            if lbl.startswith(("g1/", "fr3/")):
+                continue
+            d = bq[b, :2] - c
+            u, v = float(d @ fwd[:2]), float(d @ right[:2])
+            inside = abs(u) <= 0.5 * ISAAC_TABLE["depth_m"] and abs(v) <= 0.5 * ISAAC_TABLE["lateral_m"]
+            margin = min(0.5 * ISAAC_TABLE["depth_m"] - abs(u), 0.5 * ISAAC_TABLE["lateral_m"] - abs(v))
+            out[lbl] = {"inside": bool(inside), "margin_m": round(margin, 4), "z_m": round(float(bq[b, 2]), 4)}
+        self.scene_table["footprint"] = out
+        self.scene_table["all_inside"] = all(v["inside"] for v in out.values())
+        return out
 
     def _mesh(self, asset, stem, sdf, res, nb, margin):
         tm = load_tm(asset, stem)
@@ -675,6 +755,13 @@ class Rig:
             broad_phase="sap")
         self.contacts = self.pipeline.contacts()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.s0)
+        if TB_TABLE == "isaac":
+            self.table_footprint()
+            try:                                       # a sidecar the record step stamps as scene_table
+                Path(self.out_dir).mkdir(parents=True, exist_ok=True)
+                Path(self.out_dir, "scene_table.json").write_text(json.dumps(self.scene_table, indent=1))
+            except Exception:                          # noqa: BLE001 - never cost the run
+                pass
         self.rec = RolloutRecorder(self.model, self.out_dir,
                                    cam_pos=cam_pos, cam_target=cam_target,
                                    cam2_pos=cam2_pos, cam2_target=cam2_target,
