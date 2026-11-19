@@ -8,10 +8,11 @@ The pixels come from ``filament_server`` (``server.cpp`` beside this file), one 
 loads the scene once and renders the three cameras per request from the current body poses.  Physics is never read
 beyond ``body_q`` and never changed.
 
-Environment:
-  TB_FILAMENT_SERVER   the server binary (default ~/fl/filament_server)
-  TB_FILAMENT_IBL      a Filament IBL directory with <name>_ibl.ktx and sh.txt (default: Filament's lightroom_14b)
-  TB_FILAMENT_LUX      "ibl,sun" intensities (default "18000,75000")
+Environment (required from render version 4):
+  TB_FILAMENT_SERVER   the server binary, built with build_server.sh against a Filament release
+  TB_FILAMENT_IBL      a Filament IBL directory with <name>_ibl.ktx and sh.txt (e.g. the release's
+                       bin/assets/ibl/lightroom_14b)
+  TB_FILAMENT_LUX      "ibl,sun" intensities (optional, default "18000,75000")
 """
 from __future__ import annotations
 
@@ -26,8 +27,13 @@ import numpy as np
 from force_bench.policy_env.cameras import GL_TO_CV, PolicyCameras
 
 MAGIC = 0x46494C31
-DEFAULT_SERVER = "~/fl/filament_server"
-DEFAULT_IBL = "~/fil/filament/bin/assets/ibl/lightroom_14b"
+
+
+def _required_env(name: str) -> str:
+    v = os.environ.get(name)
+    if not v:
+        raise RuntimeError(f"render version 4 needs {name} (see force_bench/policy_env/filament/cameras.py)")
+    return os.path.expanduser(v)
 
 
 class FilamentCameras(PolicyCameras):
@@ -56,10 +62,10 @@ class FilamentCameras(PolicyCameras):
         d = Path(self._tmp.name)
         names = write_scene_glb(self.model, self.rig.s0.body_q.numpy(), str(d / "scene.glb"))
         (d / "bodies.txt").write_text("\n".join(names) + "\n")
-        ibl = Path(os.path.expanduser(os.environ.get("TB_FILAMENT_IBL", DEFAULT_IBL)))
+        ibl = Path(_required_env("TB_FILAMENT_IBL"))
         ktx = next(ibl.glob("*_ibl.ktx"))
         lux = os.environ.get("TB_FILAMENT_LUX", "18000,75000").split(",")
-        server = os.path.expanduser(os.environ.get("TB_FILAMENT_SERVER", DEFAULT_SERVER))
+        server = _required_env("TB_FILAMENT_SERVER")
         self._proc = subprocess.Popen([server, str(d / "scene.glb"), str(d / "bodies.txt"), str(ktx), str(ibl / "sh.txt"),
                                        f"{self.width}x{self.height}", "3", lux[0], lux[1]],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build filament_server against a Filament release (static libs; clang + libc++ like the release itself).
-# usage: build_server.sh FILAMENT_DIR OUT   e.g. build_server.sh ~/fil/filament ~/fl/filament_server
+# usage: build_server.sh FILAMENT_DIR OUT   (FILAMENT_DIR: an unpacked Filament release, e.g. filament-v1.81.0-linux)
 # Needs: clang, libc++-dev, libc++abi-dev, libzstd-dev, libx11-dev, and the NVIDIA Vulkan ICD for running it.
 set -euo pipefail
 F=$1; OUT=$2; L=$F/lib/x86_64
