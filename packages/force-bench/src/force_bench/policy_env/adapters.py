@@ -38,7 +38,7 @@ FORCE_LIMIT_FRAMES = int(os.environ.get("TB_FORCE_LIMIT_FRAMES", "4"))
 
 
 def force_limit_rule() -> str:
-    return (f"per-finger contact force (each finger body's total over its shapes) > {FORCE_LIMIT_N:g} N for "
+    return (f"per-finger contact force (the sum of contact magnitudes on each finger body's shapes, contract #1773) > {FORCE_LIMIT_N:g} N for "
             f"{FORCE_LIMIT_FRAMES} consecutive frame(s) at 60 Hz, fixed, independent of the grip setting")
 
 
@@ -58,6 +58,11 @@ class _Run:
         else:
             self.k = 0
         return 0
+
+
+def _elapsed(col, log, i, k) -> float:
+    """Logged time from row i to row k (the expert's own clock, accumulated floats)."""
+    return float(col(log[k], "t")) - float(col(log[i], "t"))
 
 
 class Adapter:
@@ -112,11 +117,15 @@ class Adapter:
         return FORCE_LIMIT_N
 
     def _force(self, t, f, summed=False):
-        rp = getattr(self.rig, "rule_a_probes", None)   # a row with rule-A finger probes (the sum of contact
-        if rp:                                           # magnitudes, contract #1773): the limit reads those
-            f = max((self.rig.probes[l].history[-1]["force"] for l in rp if self.rig.probes[l].history), default=0.0)
-        """f: the larger of the two pad forces this frame (N)."""
+        """f: the larger of the two NET pad forces this frame (the row's probes), kept as peak_pad_net_n.  Rule A reads
+        the episode's sum-of-contact-magnitudes finger force (contract #1773), which net cancellation can't hide."""
         lim = FORCE_LIMIT_N
+        self.peak_pad_net_n = max(getattr(self, "peak_pad_net_n", 0.0), float(f))
+        rp = getattr(self.rig, "rule_a_probes", None)   # a G1 row's own rule-A probes (each Dex1 jaw's two links)
+        if rp:
+            f = max((self.rig.probes[l].history[-1]["force"] for l in rp if self.rig.probes[l].history), default=0.0)
+        elif self.ep.finger_now is not None:
+            f = max(self.ep.finger_now)
         self.peak_pad_n = max(getattr(self, "peak_pad_n", 0.0), float(f))
         self.over = self.over + 1 if f > lim else 0
         if self.over == FORCE_LIMIT_FRAMES:
@@ -336,7 +345,7 @@ class BulbAdapter(Adapter):
         self.t_touch = None
         self.t_seat = None
         self.max_turns = 0.0
-        self.hold = None
+        self.hold, self.hold_j = None, None
         self.t_tight = None
         self.y_tight = None
         self.released_tight = False
@@ -401,18 +410,21 @@ class BulbAdapter(Adapter):
         # the part stalled (< STALL_HOLD_DEG) over T_TIGHT_CONFIRM
         # (sampled as the judge's _tight_index: hold from frame i, yaw one frame later, preload at the confirm frame)
         k = len(self.ex.log) - 1
-        n_conf = int(round(kt.T_TIGHT_CONFIRM * self.ep.fps))
         if self.t_tight is None and self.t_seat is not None:
             if self.hold is None and c("tau_pads") >= kt.TAU_TIGHT and -c("flank_z") >= kt.PRELOAD_TIGHT:
-                self.hold = k
-            elif self.hold is not None and k >= self.hold + n_conf + 1:
+                self.hold, self.hold_j = k, None
+            elif self.hold is not None:
                 i = self.hold
-                y0 = float(self._c(self.ex.log[i + 1], "yaw"))
-                y1 = float(self._c(self.ex.log[i + n_conf + 1], "yaw"))
-                if abs(y1 - y0) < np.radians(kt.STALL_HOLD_DEG) and \
-                        -float(self._c(self.ex.log[i + n_conf], "flank_z")) >= kt.PRELOAD_TIGHT:
-                    self.t_tight, self.y_tight = t, yaw
-                self.hold = None
+                if self.hold_j is None and _elapsed(self._c, self.ex.log, i, k) >= kt.T_TIGHT_CONFIRM:
+                    self.hold_j = k                    # the confirm frame, timed as the expert times it
+                if self.hold_j is not None and k >= self.hold_j + 1:
+                    j = self.hold_j
+                    y0 = float(self._c(self.ex.log[i + 1], "yaw"))
+                    y1 = float(self._c(self.ex.log[j + 1], "yaw"))
+                    if abs(y1 - y0) < np.radians(kt.STALL_HOLD_DEG) and \
+                            -float(self._c(self.ex.log[j], "flank_z")) >= kt.PRELOAD_TIGHT:
+                        self.t_tight, self.y_tight = t, yaw
+                    self.hold = None
         # the hand has left for good: clear of the bulb for CLEAR_S and moved AWAY_M from where it held it
         if not self.ep.expert_driven:
             d = float(np.linalg.norm(self.ex.tcp_meas() - self.ex.row()[:3]))
@@ -559,10 +571,18 @@ class BulbAdapter(Adapter):
             return None
         yaw = np.r_[C["yaw"][1:], C["yaw"][-1:]]          # the yaw of the state after frame k
         ok = (C["tau_pads"] >= kt.TAU_TIGHT) & (-C["flank_z"] >= kt.PRELOAD_TIGHT)
-        n = int(round(kt.T_TIGHT_CONFIRM * self.ep.fps))
+        t = C["t"]
         for i in np.flatnonzero(ok):
-            j = i + n
-            if i < i_s or j >= len(C["t"]) - 1:
+            if i < i_s:
+                continue
+            # the confirm frame as the expert finds it: the first whose logged time is T_TIGHT_CONFIRM past the
+            # hold's start, on the same accumulated float times (9 frames of 1/60 s can sum to 0.149999..., so
+            # round(0.15 * fps) frames confirms one frame early: FR3 5.2 seed 1's rerun read a preload dip there)
+            later = np.flatnonzero(t[i:] - t[i] >= kt.T_TIGHT_CONFIRM)
+            if not len(later):
+                continue
+            j = i + int(later[0])
+            if j >= len(t) - 1:
                 continue
             if abs(yaw[j] - yaw[i]) < np.radians(kt.STALL_HOLD_DEG) and -C["flank_z"][j] >= kt.PRELOAD_TIGHT:
                 return int(j)
