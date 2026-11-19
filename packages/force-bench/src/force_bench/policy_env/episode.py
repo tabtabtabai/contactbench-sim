@@ -90,7 +90,8 @@ class Episode:
         self.finger_now = None
         # the FR3 arm's torques against its limits (the G1 rows carry their own TorqueMonitor)
         self.arm_torque = None
-        if "fr3/fr3_link0" in [str(b) for b in rig.model.body_label]:
+        # (the FR3's fixed base link is merged away in the simulated model; its fingers are not)
+        if "fr3/fr3_leftfinger" in [str(b) for b in rig.model.body_label]:
             from force_bench.policy_env.arm_torque import ArmTorqueMonitor
             self.arm_torque = ArmTorqueMonitor(rig.model, getattr(rig, "solver", None))
         self.adapter = adapter_cls(self)
