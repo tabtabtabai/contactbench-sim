@@ -242,6 +242,37 @@ A stage carries the asset's joints, springs, stops and contact settings; `force_
 it to any `newton.ModelBuilder` and applies the solver settings the calibration assumes. Both routes, the settings
 to keep, and what to expect in other simulators: [docs/custom_scenes.md](docs/custom_scenes.md).
 
+## Render version 4: Filament policy cameras in the Isaac scene (G1)
+
+The G1 rows' policy cameras (the scene pair and the G1's head and wrist mounts) can be drawn by
+[Filament](https://github.com/google/filament) inside the Unitree Isaac challenge scene instead of Newton's raytracer.
+The cameras, intrinsics `K` and `matrix.scene-observation.v1` calibration are exactly `PolicyCameras'`; only the image
+changes: the Isaac room (`bright_room.usd`) and table (`plain_table.usd`) placed by the pelvis (where `TB_TABLE=isaac`
+puts the physics table), the Isaac G1's USD materials, a uniform dome plus an 8° key light, PBR shading, soft shadows,
+SSAO, screen-space reflections and MSAA. Physics is untouched (only `body_q` is read).
+
+Enable it:
+
+```bash
+bash packages/force-bench/src/force_bench/policy_env/filament/build_server.sh ./filament_server   # pinned Filament v1.81.0
+export TB_FILAMENT_SERVER=$PWD/filament_server   # with this set, render v4 is the G1 default
+# TB_RENDER_VERSION=4 forces it (and fails without the server); TB_RENDER_VERSION=1 keeps Newton
+```
+
+The server needs an NVIDIA driver with its Vulkan ICD (no X server). CI (`.github/workflows/filament-server.yml`) builds
+the same binary as an artifact. Each episode's record carries `render_version`, and its folder gets
+`render_v4_scene.glb`, `render_v4_bodies.txt` and `render_v4.json` (the server options, cameras and the request timing),
+so a recorded `rollout_states.npz` can be re-rendered with exactly the scene the policy saw.
+
+Cost (L4, 640x480): 20.1 ms per request for all four cameras (p90 21.0 ms), measured live in a 5.1 knob episode
+(222 requests), including the transfer back to Python. Newton's raytracer takes about 16 ms per camera at the same size.
+
+Parity: geometry is identical by construction (the same camera poses, K and calibration code). The look's exposure,
+key/dome balance and two robot-material scales are fitted to real G1 head-camera frames (region-mean error 20 in 8-bit
+units, against 57 for a fit to an Isaac RTX render); every other value is read from the Isaac assets
+(`policy_env/filament/isaac_scene.py`). Against Isaac RTX itself: no global illumination or ray-traced reflections.
+The same live episode, with Filament cameras, ends as the Newton-camera run does (success, 14.783 s world time).
+
 ## Data collection and teleoperation
 
 **Demonstrations from the scripted policies.** Each episode runs in a fresh process and stores aligned
