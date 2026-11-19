@@ -53,8 +53,12 @@ COLLIDE_BODIES = ("hand_Link1_2", "hand_Link1_3", "hand_Link2_2", "hand_Link2_3"
 # How the Dex1 finger links collide: "box" (one box per link fitted to its collision mesh's body-frame bounds: the
 # published G1 sets) or "mesh" (a CoACD convex decomposition of each link's collision mesh, from G1_FINGER_HULLS:
 # a file written by force_bench.g1.finger_hulls).  Contact parameters (mu, solref/solimp, margins) are the same.
-FINGER_COLLISION = os.environ.get("G1_FINGER_COLLISION", "box")
-FINGER_HULLS = os.environ.get("G1_FINGER_HULLS", "")
+_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+# Defaults (19 Nov): MESH fingers and the model's arm kv. The box fingers and kd = 0.04 kp stay selectable
+# (G1_FINGER_COLLISION=box, G1_ARM_DAMPING=legacy) and every record says which it used; the published box-finger
+# sets are the earlier model.
+FINGER_COLLISION = os.environ.get("G1_FINGER_COLLISION", "mesh")
+FINGER_HULLS = os.environ.get("G1_FINGER_HULLS") or os.path.join(_DATA, "dex1_finger_hulls.npz")
 FINGER_COLLISION_MODEL: dict = {}        # filled by add_g1 in "mesh" mode (method, pieces, deviation, sources)
 if FINGER_COLLISION not in ("box", "mesh"):
     raise ValueError(f"G1_FINGER_COLLISION={FINGER_COLLISION!r}: box or mesh")
@@ -68,8 +72,8 @@ if FINGER_COMMAND not in ("position", "force"):
 DEX1_Q_CLOSED = 0.0245                    # the finger joints' closed end of travel (limit_upper)
 # Arm damping: "legacy" (kd = 0.04 kp: the box-finger sets) or "model" (the compiled MuJoCo model's actuator kv, from
 # G1_DRIVE_GAINS: a file g1_dex1_drive_gains.py exports beside the model npz, checked against its sha256)
-ARM_DAMPING = os.environ.get("G1_ARM_DAMPING", "legacy")
-DRIVE_GAINS = os.environ.get("G1_DRIVE_GAINS", "")
+ARM_DAMPING = os.environ.get("G1_ARM_DAMPING", "model")
+DRIVE_GAINS = os.environ.get("G1_DRIVE_GAINS") or os.path.join(_DATA, "g1_dex1_drive_gains.json")
 if ARM_DAMPING not in ("legacy", "model"):
     raise ValueError(f"G1_ARM_DAMPING={ARM_DAMPING!r}: legacy or model")
 ARM_KD_USED: dict = {}                    # joint -> kd, filled by add_g1
