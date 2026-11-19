@@ -39,6 +39,10 @@ from force_bench.rig import make_solver
 from force_bench.tasks.nut_bolt_arm import PairProbe
 
 NAME = "turn_dial_to_target_g1"
+# the jaws close on a ramp to a set overdrive past the bar's flats (the bar is 10 mm thick: contact at a 5 mm pad
+# half-gap, finger joint 0.0215 - 0.005), ~48 N per finger at the Dex1's 8000 N/m; snapping the target to fully
+# closed slammed the jaws into the bar (220 N per finger, the force limit, on the first steep-grasp check)
+FINGER_BAR_CONTACT, FINGER_OVERDRIVE, FINGER_RAMP_S = 0.0215 - 0.005, 0.006, 0.6
 FINGER_OPEN, FINGER_CLOSE = -0.02, 0.0245      # Dex1 finger joints: 83 mm open; fully closed (the squeeze is the
 #                                                effort limit, G1_FINGER_EFFORT)
 PRE_HOLD = 0.4
@@ -46,6 +50,22 @@ TURN_RATE, TURN_LEAD, TRIM_DEG = 40.0, 12.0, 2.0   # deg/s; at most this far ahe
 T_SETTLE, T_OPEN, T_RETREAT = 0.3, 0.5, 1.2
 TIMEOUT_S = float(os.environ.get("G1_MAX_T", 40.0))   # G1_MAX_T: a short pre-flight run
 CAM_POS, CAM_TARGET = np.array([0.30, -0.35, 0.30]), np.array([-0.05, 0.05, 0.04])
+
+
+class FingerRamp:
+    """The finger target: open, or a minimum-jerk ramp (FINGER_RAMP_S) from where it is to the bar's contact plus
+    FINGER_OVERDRIVE, restarted whenever the hand switches between open and closed."""
+
+    def __init__(self):
+        self.closed, self.t0, self.f0, self.f = False, 0.0, FINGER_OPEN, FINGER_OPEN
+
+    def __call__(self, close: bool, t: float) -> float:
+        if close != self.closed:
+            self.closed, self.t0, self.f0 = close, t, self.f
+        goal = min(FINGER_CLOSE, FINGER_BAR_CONTACT + FINGER_OVERDRIVE) if close else FINGER_OPEN
+        u = min(1.0, max(0.0, (t - self.t0) / FINGER_RAMP_S))
+        self.f = self.f0 + (goal - self.f0) * u * u * u * (10 - 15 * u + 6 * u * u)
+        return self.f
 
 
 class G1DialLog:
@@ -112,6 +132,7 @@ def _stroke_controller(traj, lg, rig, arm_names, fingers, tq_index, f_index, go,
         return (np.array([np.interp(x, T["deg"], T["q"][:, j]) for j in range(T["q"].shape[1])]),
                 np.array([np.interp(x, T["deg"], T["tau_g"][:, j]) for j in range(T["tau_g"].shape[1])]))
 
+    ramp = FingerRamp()
     def control(t):
         ph, sk = st["phase"], S[st["k"]]
         ang = float(np.degrees(lg.log[-1]["ang"])) if lg.log else 0.0
@@ -160,8 +181,9 @@ def _stroke_controller(traj, lg, rig, arm_names, fingers, tq_index, f_index, go,
         qt = rig.control.joint_target_q.numpy()
         for n, v in zip(arm_names, q):
             qt[tq_index[n]] = v
+        fing = ramp(close, t)
         for n in fingers:
-            qt[tq_index[n]] = FINGER_CLOSE if close else FINGER_OPEN
+            qt[tq_index[n]] = fing
         rig.control.joint_target_q.assign(qt)
         jf = rig.control.joint_f.numpy()
         jf[f_index] = g
@@ -297,6 +319,7 @@ def main(argv=None):
         st["phase"], st["t_phase"] = phase, t
         st["phases"].append((round(t, 3), phase))
 
+    ramp = FingerRamp()
     def control(t):
         ph = st["phase"]
         ang = float(np.degrees(lg.log[-1]["ang"])) if lg.log else 0.0
@@ -344,8 +367,9 @@ def main(argv=None):
         qt = rig.control.joint_target_q.numpy()
         for n, v in zip(arm_names, q):
             qt[tq_index[n]] = v
+        fing = ramp(close, t)
         for n in fingers:
-            qt[tq_index[n]] = FINGER_CLOSE if close else FINGER_OPEN
+            qt[tq_index[n]] = fing
         rig.control.joint_target_q.assign(qt)
         jf = rig.control.joint_f.numpy()
         jf[f_index] = g
