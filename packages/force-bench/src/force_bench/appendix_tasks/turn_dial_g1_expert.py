@@ -43,8 +43,10 @@ from force_bench.robot.franka import down_grasp_quat
 from force_bench.tasks.nut_bolt_arm import PairProbe
 
 NAME = "turn_dial_g1_expert"
-SIDE = "right"
-STANCE = tuple(float(v) for v in os.environ.get("G1_DIAL_STANCE", "0.30,0.00").split(","))   # m, the dial axis
+SIDE = os.environ.get("G1_DIAL_SIDE", "left")   # the left arm: its top-down wrist window lines up with the bar's
+#                                                yaw at 6/10 seeds, the right arm's at 1/10 (g1_dial_stance_search.py)
+STANCE = tuple(float(v) for v in os.environ.get("G1_DIAL_STANCE", "0.27,0.25").split(","))   # m, the dial axis
+#                                                ahead of / to the left of the pelvis (the search's choice, left arm)
 DIAL, KNOB, TARGET_DEG = "standard", "flat", 90.0
 DEX1_TIP_PAST_PAD = 0.0273           # top-down: the fingertips this far below the pad centre (the FR3's are 9.93 mm)
 TURN_NEED = math.radians(TARGET_DEG) + T.EXPERT_TRIM_CLAMP + math.radians(5.0)
