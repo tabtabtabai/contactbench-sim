@@ -7,7 +7,7 @@
 #
 # Fetches filament-$FILAMENT_VERSION-linux.tgz from GitHub releases, checks its sha256 against the pin, and links the
 # server against its static libraries with clang + libc++ (the release's own toolchain).
-# Build deps (Ubuntu 24.04): clang libc++-dev libc++abi-dev libzstd-dev libx11-dev curl
+# Build deps (Ubuntu 24.04): clang libc++-dev libc++abi-dev libzstd-dev libx11-dev libvulkan-dev curl
 # Runtime: an NVIDIA driver with its Vulkan ICD (no X server; the server renders headless on Vulkan).
 set -euo pipefail
 FILAMENT_VERSION=v1.81.0

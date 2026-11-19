@@ -45,7 +45,9 @@
 #include <math/vec4.h>
 #include <math/quat.h>
 #include <utils/EntityManager.h>
-#include <bluevk/BlueVK.h>
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>   // the Khronos headers (libvulkan-dev); the loader is dlopened below
+#include <dlfcn.h>
 
 #include <cmath>
 #include <cstdio>
@@ -70,22 +72,29 @@ static std::vector<uint8_t> readFile(const char* path) {
 static bool readAll(void* dst, size_t n) { return std::fread(dst, 1, n, stdin) == n; }
 
 // Every Vulkan physical device the loader offers, logged to stderr; true when at least one is not a CPU device.
+// It loads libvulkan.so.1 itself (as Filament's BlueVK does), so the check sees the same ICDs Filament will.
 static bool vulkanHasGpu() {
-    if (!bluevk::initialize()) { std::fprintf(stderr, "[filament] vulkan: cannot load libvulkan.so.1\n"); return false; }
+    void* lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) { std::fprintf(stderr, "[filament] vulkan: cannot load libvulkan.so.1\n"); return false; }
+    auto gipa = (PFN_vkGetInstanceProcAddr) dlsym(lib, "vkGetInstanceProcAddr");
+    auto createInstance = gipa ? (PFN_vkCreateInstance) gipa(VK_NULL_HANDLE, "vkCreateInstance") : nullptr;
+    if (!createInstance) { std::fprintf(stderr, "[filament] vulkan: libvulkan.so.1 has no vkCreateInstance\n"); return false; }
     VkApplicationInfo app{}; app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO; app.apiVersion = VK_API_VERSION_1_1;
     VkInstanceCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO; ci.pApplicationInfo = &app;
     VkInstance inst = VK_NULL_HANDLE;
-    VkResult r = bluevk::vkCreateInstance(&ci, nullptr, &inst);
+    VkResult r = createInstance(&ci, nullptr, &inst);
     if (r != VK_SUCCESS) { std::fprintf(stderr, "[filament] vulkan: vkCreateInstance failed (%d): no usable ICD\n", (int) r); return false; }
-    bluevk::bindInstance(inst);
+    auto enumerate = (PFN_vkEnumeratePhysicalDevices) gipa(inst, "vkEnumeratePhysicalDevices");
+    auto properties = (PFN_vkGetPhysicalDeviceProperties) gipa(inst, "vkGetPhysicalDeviceProperties");
+    auto destroy = (PFN_vkDestroyInstance) gipa(inst, "vkDestroyInstance");
     uint32_t n = 0;
-    bluevk::vkEnumeratePhysicalDevices(inst, &n, nullptr);
+    enumerate(inst, &n, nullptr);
     std::vector<VkPhysicalDevice> devs(n);
-    if (n) bluevk::vkEnumeratePhysicalDevices(inst, &n, devs.data());
+    if (n) enumerate(inst, &n, devs.data());
     bool gpu = false;
     for (auto d : devs) {
         VkPhysicalDeviceProperties p{};
-        bluevk::vkGetPhysicalDeviceProperties(d, &p);
+        properties(d, &p);
         const char* type = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete GPU"
                          : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated GPU"
                          : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? "virtual GPU"
@@ -94,7 +103,7 @@ static bool vulkanHasGpu() {
         if (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) gpu = true;
     }
     if (!n) std::fprintf(stderr, "[filament] vulkan: no physical devices\n");
-    bluevk::vkDestroyInstance(inst, nullptr);
+    destroy(inst, nullptr);
     return gpu;
 }
 
