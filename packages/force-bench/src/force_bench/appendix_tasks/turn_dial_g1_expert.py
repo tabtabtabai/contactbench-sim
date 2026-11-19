@@ -605,18 +605,6 @@ def main(argv=None):
         kp_f = float(rig.model.joint_target_ke.numpy()[fdofs[0]])
         ex.f_grip = max(0.0, ex.f_touch - 1.25 * T.SQUEEZE[KNOB] / kp_f)   # the cap (70 N) binds at the Dex1's gain
         grip_ref.update(ex=ex, kp=kp_f)
-    if os.environ.get("G1_DIAG_TRACE") == "1":
-        ex.diag = []
-        ex.diag_q = [int(qs_b[g1["joints"][n]]) for n in fingers]
-        ex.diag_qt = list(fin_t)
-        ex.diag_hand = g1["bodies"][f"{SIDE}_hand_base_link"]
-        if os.environ.get("G1_DIAG_CONTACTS") == "1":
-            sb_ = rig.model.shape_body.numpy()
-            blab = [str(x) for x in rig.model.body_label]
-            jaws = {k: [i for i in range(rig.model.shape_count) if sb_[i] >= 0 and blab[sb_[i]] in
-                        (f"{PREFIX}{SIDE}_hand_Link{k}_2", f"{PREFIX}{SIDE}_hand_Link{k}_3")] for k in (1, 2)}
-            lbl_ = [str(x or "") for x in rig.model.shape_label]
-            ex.diag_contact_shapes = (jaws, [lbl_.index(x) for x in knob_shapes])
         rig.finger_params = finger_readback(rig.solver, rig.model, g1, SIDE, overdrive_m=1.25 * T.SQUEEZE[KNOB] / kp_f)
         ex.setup_strokes(ys_b, ok_b, yaw0, first)
         rig.variant_extra.update(
@@ -630,6 +618,18 @@ def main(argv=None):
                                    _runs(ys_b, ok_b)])
     else:
         ex = G1DialExpert(rig, h, DIAL, KNOB, math.radians(TARGET_DEG), g, probes, tips, a0)
+    if os.environ.get("G1_DIAG_TRACE") == "1":
+        ex.diag = []
+        ex.diag_q = [int(qs_b[g1["joints"][n]]) for n in fingers]
+        ex.diag_qt = list(fin_t)
+        ex.diag_hand = g1["bodies"][f"{SIDE}_hand_base_link"]
+        if os.environ.get("G1_DIAG_CONTACTS") == "1":
+            sb_ = rig.model.shape_body.numpy()
+            blab = [str(x) for x in rig.model.body_label]
+            jaws = {k: [i for i in range(rig.model.shape_count) if sb_[i] >= 0 and blab[sb_[i]] in
+                        (f"{PREFIX}{SIDE}_hand_Link{k}_2", f"{PREFIX}{SIDE}_hand_Link{k}_3")] for k in (1, 2)}
+            lbl_ = [str(x or "") for x in rig.model.shape_label]
+            ex.diag_contact_shapes = (jaws, [lbl_.index(x) for x in knob_shapes])
     print(f"[{NAME}] seed {a.seed}: dial {np.round(axis * 1e3, 1).tolist()} mm, yaw {math.degrees(yaw0):+.1f}; "
           f"grasp yaw {math.degrees(a0):+.1f} (turn to {math.degrees(a0 + TURN_NEED):+.1f}); "
           f"ff budget {np.round(budget, 2).tolist()} N.m", flush=True)
