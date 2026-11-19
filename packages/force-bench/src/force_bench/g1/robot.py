@@ -827,6 +827,38 @@ class MagnitudeProbe:
         return rec
 
 
+def solver_options_readback(solver) -> dict:
+    """The MuJoCo solver options as the running solver holds them (mjw_model.opt, else mj_model.opt): cone,
+    impratio, iterations, noslip iterations, integrator, timestep.  Proves the setting rather than inferring it."""
+    s = solver
+    for _ in range(4):
+        if hasattr(s, "mjw_model") or hasattr(s, "mj_model"):
+            break
+        s = getattr(s, "solver", None) or getattr(s, "inner", None) or getattr(s, "_solver", None)
+    out = {}
+    for src in ("mjw_model", "mj_model"):
+        m = getattr(s, src, None)
+        opt = getattr(m, "opt", None) if m is not None else None
+        if opt is None:
+            continue
+        d = {}
+        for f in ("cone", "impratio", "iterations", "ls_iterations", "noslip_iterations", "integrator", "timestep",
+                  "solver", "tolerance"):
+            v = getattr(opt, f, None)
+            if v is None:
+                continue
+            try:
+                v = v.numpy()
+            except AttributeError:
+                pass
+            v = np.asarray(v).ravel()
+            d[f] = (float(v[0]) if v.dtype.kind == "f" else int(v[0])) if v.size else None
+        if "cone" in d:
+            d["cone_name"] = {0: "pyramidal", 1: "elliptic"}.get(d["cone"], str(d["cone"]))
+        out[src] = d
+    return out
+
+
 def contact_log(model, contacts, state, mine_shapes, other_shapes) -> list:
     """Every contact between a shape in ``mine_shapes`` and one in ``other_shapes`` this frame (diagnosis): world
     points on both shapes, the normal (shape 0 -> 1), the solver's force on the contact split into normal and

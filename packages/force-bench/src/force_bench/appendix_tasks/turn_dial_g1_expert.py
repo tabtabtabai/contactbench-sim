@@ -642,6 +642,8 @@ def main(argv=None):
     paths = rig.rec.save("rollout", force_keys=["pads_N", "robot_object_contact_N"])
     if ex.diag is not None:
         Path(rig.out_dir, "g1_jaw_trace.jsonl").write_text("\n".join(json.dumps(r) for r in ex.diag))
+        Path(rig.out_dir, "g1_solver_options.json").write_text(json.dumps(G1R.solver_options_readback(rig.solver),
+                                                                         indent=1))
     return T.verdict(rig, h, g, ex, DIAL, KNOB, TARGET_DEG, key, choice, paths, a.seed, start)
 
 
