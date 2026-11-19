@@ -49,6 +49,8 @@ SIDE = os.environ.get("G1_DIAL_SIDE", "left")   # the left arm: its top-down wri
 STANCE = tuple(float(v) for v in os.environ.get("G1_DIAL_STANCE", "0.27,0.25").split(","))   # m, the dial axis
 #                                                ahead of / to the left of the pelvis (the search's choice, left arm)
 DIAL, KNOB, TARGET_DEG = "standard", "flat", 90.0
+SQUEEZE_N = float(os.environ.get("G1_DIAL_SQUEEZE", T.SQUEEZE["flat"]))   # N per finger (the FR3 row's 70 by default)
+T.SQUEEZE = {**T.SQUEEZE, KNOB: SQUEEZE_N}                                 # the expert's squeeze() and grip read it
 DEX1_TIP_PAST_PAD = 0.0273           # top-down: the fingertips this far below the pad centre (the FR3's are 9.93 mm)
 TURN_NEED = math.radians(TARGET_DEG) + T.EXPERT_TRIM_CLAMP + math.radians(5.0)
 MARGIN = math.radians(10.0)          # IK checked this far past both ends of the turn
