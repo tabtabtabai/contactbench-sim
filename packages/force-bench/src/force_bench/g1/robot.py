@@ -639,7 +639,10 @@ class MagnitudeProbe:
         self.history = []
 
     def sample(self, contacts, state, t):
-        rec = {"t": t, "force": 0.0, "friction": 0.0}
+        """force: the sum over the finger's contacts of |f . n| (the NORMAL-force magnitudes, rule A, contract #1773
+        of 19 Nov: opposite-face normals still add, a twist's friction couple does not count as squeeze);
+        force_full: the sum of the full |f| (the earlier rule; force <= force_full)."""
+        rec = {"t": t, "force": 0.0, "force_full": 0.0, "friction": 0.0}
         f = getattr(contacts, "force", None)
         n = int(contacts.rigid_contact_count.numpy()[0]) if f is not None else 0
         if n > 0:
@@ -650,7 +653,10 @@ class MagnitudeProbe:
             a, b = np.clip(s0, 0, None), np.clip(s1, 0, None)
             sel = ok & ((self.mine[a] & self.other[b]) | (self.mine[b] & self.other[a]))
             if sel.any():
-                rec["force"] = float(np.linalg.norm(f.numpy()[:n][sel][:, :3].astype(float), axis=1).sum())
+                fv = f.numpy()[:n][sel][:, :3].astype(float)
+                nv = contacts.rigid_contact_normal.numpy()[:n][sel][:, :3].astype(float)
+                rec["force"] = float(np.abs((fv * nv).sum(axis=1)).sum())
+                rec["force_full"] = float(np.linalg.norm(fv, axis=1).sum())
         self.history.append(rec)
         return rec
 
