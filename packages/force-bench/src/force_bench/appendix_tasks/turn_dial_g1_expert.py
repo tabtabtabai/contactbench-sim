@@ -96,6 +96,33 @@ def turn_fit(ik, axis, z, yaw0, gravity_joints):
     return None
 
 
+def reach_band(ik, axis, z, step_deg=15.0):
+    """Which top-down yaws the IK reaches at the grasp (each from the reset pose, FIT_TOL): the band, as runs of
+    reached yaws (deg)."""
+    q_home = ik.joint_q.numpy().copy()
+    p = np.array([axis[0], axis[1], z])
+    ok = []
+    for y in np.arange(-180.0, 180.0 + 1e-9, step_deg):
+        ik.joint_q.assign(q_home)
+        for _ in range(3):
+            ik.solve(p, down_grasp_quat(math.radians(y)), iterations=64)
+        e = ik.residual(p, down_grasp_quat(math.radians(y)))
+        ok.append((float(y), e[0] <= FIT_TOL[0] and e[1] <= FIT_TOL[1]))
+    runs, cur = [], None
+    for y, r in ok:
+        if r and cur is None:
+            cur = [y, y]
+        elif r:
+            cur[1] = y
+        elif cur is not None:
+            runs.append(cur)
+            cur = None
+    if cur is not None:
+        runs.append(cur)
+    ik.joint_q.assign(q_home)
+    return runs
+
+
 class G1DialExpert(T.Expert):
     """The FR3 row's Expert, unchanged, with the squeeze written to the Dex1 finger actuators and the arm torques
     sampled each frame."""
@@ -156,9 +183,15 @@ def main(argv=None):
     fit = turn_fit(ik, axis, tcp0[2], yaw0, ik.arm_joints)
     miss = None
     if fit is None:
+        need = [[round(math.degrees(math.remainder(b, 2 * math.pi) - MARGIN), 1),
+                 round(math.degrees(math.remainder(b, 2 * math.pi) + TURN_NEED + MARGIN), 1)]
+                for b in (yaw0, yaw0 + math.pi)]
         LAST_MISS.update(dial_xy_m=[round(float(v), 4) for v in axis], dial_yaw_deg=round(math.degrees(yaw0), 1),
                          needed_deg=round(math.degrees(TURN_NEED + 2 * MARGIN), 1), arm=SIDE,
-                         ik_tolerance=[FIT_TOL[0], round(math.degrees(FIT_TOL[1]), 1)])
+                         ik_tolerance=[FIT_TOL[0], round(math.degrees(FIT_TOL[1]), 1)],
+                         binding_constraint="wrist-band position vs the bar's yaw: neither needed yaw range lies "
+                                            "inside the reached top-down band",
+                         needed_yaw_ranges_deg=need, reached_band_deg=reach_band(ik, axis, tcp0[2]))
         miss = SystemExit(f"{NAME}: no top-down wrist window reaches the dial's turn: neither from the bar's yaw "
                           f"({math.degrees(yaw0):+.1f}) nor its 180-deg twin does the IK follow a "
                           f"{math.degrees(TURN_NEED + 2 * MARGIN):.0f} deg top-down turn at the grip")
