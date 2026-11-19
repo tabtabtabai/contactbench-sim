@@ -494,7 +494,13 @@ def main(argv=None):
         "dial_twist_source": "the FR3 expert's 45 deg/s wrist ramp, inside the G1 rule (<= 0.9 rad/s)",
         "dial_turn_window_needed_deg": round(math.degrees(TURN_NEED), 1),
         "dial_tip_lift_m": tip_lift, "dial_rotate_max_rad_s": ROTATE_MAX,
-        "dial_finger_kd_scale": float(os.environ.get("G1_FINGER_KD_SCALE", 1.0))}
+        "dial_finger_damping": {
+            "kd_N_s_per_m": round(float(rig.model.joint_target_kd.numpy()[fdofs[0]]), 3),
+            "multiplier": float(os.environ.get("G1_FINGER_KD_SCALE", 1.0)),
+            "base": "matrix's MuJoCo Dex1 finger kd = 0.01 x kp",
+            "note": "a position-controller gain (the finger drive's damping), not a contact or material property; the "
+                    "finger actuator force cap is unchanged (finger_actuators_sim_readback); the contact model "
+                    "(solref/solimp, pad stiffness) is untouched"}}
     (rig.out_dir / "g1_plan.json").write_text(json.dumps(rig.g1_plan, indent=1))
 
     # ── the drive the FR3 expert calls ──────────────────────────────────────────────────────────────────────
