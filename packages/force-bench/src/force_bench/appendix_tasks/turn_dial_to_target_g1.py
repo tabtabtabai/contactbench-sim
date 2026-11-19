@@ -194,15 +194,19 @@ def main(argv=None):
     pelvis = wp.transform(wp.vec3(*traj["pelvis_cb"]), wp.quat_identity())
     g1 = add_g1(rig.builder, a.model, pelvis)
     rig.robot_base = pelvis
+    miss = traj.get("reach_miss")                # no grasp reaches this seed's dial: render the start, report it
     # actuator + gravity feed-forward within the G1's torque limits: the feed-forward's peak over every plan table
-    nj = len(traj["arm_joints"])
+    nj = len(traj.get("arm_joints") or [])
     tabs = [traj.get("tau_g") or [], traj.get("retreat_tau_g") or []]
     for sk in traj.get("strokes") or []:
         tabs += [sk.get("tau_g") or [], sk["turn_table"].get("tau_g") or [], sk.get("up_tau_g") or []]
     if "turn_table" in traj:
         tabs.append(traj["turn_table"].get("tau_g") or [])
-    ff = np.abs(np.concatenate([np.asarray(x, float).reshape(-1, nj) for x in tabs if len(x)]))
-    rig.effort_budget = cap_headroom(rig.builder, g1, traj["arm_joints"], ff.max(axis=0))
+    if miss:
+        rig.effort_budget = {}
+    else:
+        ff = np.abs(np.concatenate([np.asarray(x, float).reshape(-1, nj) for x in tabs if len(x)]))
+        rig.effort_budget = cap_headroom(rig.builder, g1, traj["arm_joints"], ff.max(axis=0))
     px = float(traj["pelvis_cb"][0])
     rig.table(center_xy=(px + 0.12 + 0.35, float(start[1])), half=0.35)
     if "floor_cb" in traj:                       # the G1 on its floor, a solid table under the board (Isaac setup)
@@ -229,6 +233,16 @@ def main(argv=None):
     rig.contact_peak = rig.probes["g1/contact"] = ContactPeak(rig.model)   # names the pair behind any force peak
     rig.camera_mounts = camera_mounts(a.model, side)
     apply_look(rig.model, g1)                    # the G1's own colours, after the recorder's palette (finalize)
+    if miss:                                     # both arms in the reset pose, the start frame, then the miss
+        from force_bench.appendix_tasks.install_light_bulb_g1 import render_start
+        qi_ = q_indices(rig.model, g1["joints"])
+        q0 = rig.s0.joint_q.numpy()
+        for n, v in init_pose(a.model).items():
+            if n in qi_:
+                q0[qi_[n]] = v
+        rig.s0.joint_q.assign(q0)
+        rig.start_videos = render_start(rig)
+        raise SystemExit(f"reach miss: {traj.get('detail', 'no plan reaches this seed at the fixed stance')}")
     tips = [g1["bodies"][f"{side}_hand_Link{i}_3"] for i in (1, 2)]
     lg = G1DialLog(rig, h, probes, tips, np.radians(traj["target_deg"]))
     qi = q_indices(rig.model, g1["joints"])
