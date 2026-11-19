@@ -28,6 +28,9 @@ class FingerMagnitudes:
         k = len(fingers)
         self.peak = [(0.0, None)] * k
         self.peak_full = [(0.0, None)] * k
+        labels = [str(x or "") for x in model.shape_label]
+        self.shape_labels = labels
+        self.pair_peak = (0.0, None, None)                 # the strongest single shape pair: (full |f| sum, t, pair)
         self.over, self.run, self.longest = [0] * k, [0] * k, [0] * k
 
     def sample(self, contacts, t) -> tuple:
@@ -47,10 +50,23 @@ class FingerMagnitudes:
             nrm = contacts.rigid_contact_normal.numpy()[:n].astype(float)
             mag = np.linalg.norm(F, axis=1)
             fn = np.abs((F * nrm).sum(axis=1))             # the normal component's magnitude
+            anyf = np.zeros(len(a), bool)
             for k, m in enumerate(self.mask):
                 sel = ok & (m[a] ^ m[b])                   # one side on this finger, the other anything else
                 out[k] = float(fn[sel].sum())
                 full[k] = float(mag[sel].sum())
+                anyf |= sel
+            # the contract's single-frame contact (score.py HARD_FLAGS): the strongest SHAPE PAIR's full |f| sum
+            if anyf.any():
+                idx = np.flatnonzero(anyf)
+                keys = np.stack([np.minimum(a[idx], b[idx]), np.maximum(a[idx], b[idx])], axis=1)
+                uniq, inv = np.unique(keys, axis=0, return_inverse=True)
+                sums = np.bincount(inv.ravel(), weights=mag[idx])
+                j = int(np.argmax(sums))
+                if sums[j] > self.pair_peak[0]:
+                    sa, sb = (int(v) for v in uniq[j])
+                    self.pair_peak = (float(sums[j]), round(float(t), 4),
+                                      (self.shape_labels[sa], self.shape_labels[sb]))
         for k, v in enumerate(out):
             if v > self.peak[k][0]:
                 self.peak[k] = (v, round(float(t), 4))
@@ -77,6 +93,15 @@ class FingerMagnitudes:
                 "full_magnitude_peak_N": round(max(v[0] for v in self.peak_full), 1),
                 "limit_N": self.limit, "run_frames": self.run_frames}
 
+    def max_single_frame_contact(self) -> dict:
+        """The contract's physics_qa.max_single_frame_contact_N (a number) and its detail: the strongest single shape
+        pair involving a finger, by its full |f| sum, over the episode."""
+        f, t, pair = self.pair_peak
+        return {"max_single_frame_contact_N": round(f, 1),
+                "max_single_frame_contact_detail": {"force_N": round(f, 1), "t": t, "pair": list(pair) if pair else None,
+                                                    "measure": "strongest finger shape pair, full |f| sum",
+                                                    "flag_threshold_N": 500.0}}
+
     def flags(self, single_frame_n: float = 500.0) -> list:
-        return [f"single_frame_finger_contact_over_{single_frame_n:g}N:{name}"
-                for k, name in enumerate(self.fingers) if self.peak[k][0] > single_frame_n]
+        """The contract's flag names (sims/clockwork/score.py HARD_FLAGS).  Actuator-at-cap is not measured for the FR3."""
+        return ["single_frame_contact_over_500N"] if self.pair_peak[0] > single_frame_n else []

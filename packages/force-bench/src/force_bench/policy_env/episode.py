@@ -90,6 +90,12 @@ class Episode:
         self.finger_mag = None if getattr(rig, "rule_a_probes", None) else \
             FingerMagnitudes(rig.model, getattr(adapter_cls, "finger_bodies", None) or FR3_FINGERS)
         self.finger_now = None
+        # the FR3 arm's torques against its limits (the G1 rows carry their own TorqueMonitor)
+        self.arm_torque = None
+        # (the FR3's fixed base link is merged away in the simulated model; its fingers are not)
+        if "fr3/fr3_leftfinger" in [str(b) for b in rig.model.body_label]:
+            from force_bench.policy_env.arm_torque import ArmTorqueMonitor
+            self.arm_torque = ArmTorqueMonitor(rig.model, getattr(rig, "solver", None))
         self.adapter = adapter_cls(self)
         self.cams = None
         self.videos = {}
@@ -208,6 +214,8 @@ class Episode:
             self.finger_now = self.finger_mag.sample(rig.contacts, self.t)   # rule A's force (sum of magnitudes)
         else:
             self.finger_now = [rig.probes[l].history[-1]["force"] for l in rig.rule_a_probes]
+        if self.arm_torque is not None:
+            self.arm_torque.sample(rig.s0, rig.control, self.t)
         if self.extra_cb:
             forces.update(self.extra_cb(rig.s0, self.t))
         if rig.rec is not None:
