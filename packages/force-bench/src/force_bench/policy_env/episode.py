@@ -134,9 +134,27 @@ class Episode:
     SETTLE_FINGER_M_S = 0.002        # and both fingers slower than this
     SETTLE_CAP_S = 2.0               # at most this much world time is stepped before the world freezes
 
+    def _settle_dofs(self):
+        """(arm dofs, finger dofs): the FR3's [:7] / [7:9]; on a G1 rig, every G1 arm joint and every Dex1 finger
+        joint, by joint label (the same thresholds)."""
+        if getattr(self, "_settle_idx", None) is None:
+            m = self.rig.model
+            labels = [str(x or "") for x in m.joint_label]
+            if any(lb.startswith("g1/") for lb in labels):
+                ds = m.joint_qd_start.numpy()
+                arm = [int(ds[j]) for j, lb in enumerate(labels) if lb.startswith("g1/") and any(
+                    lb.endswith(f"_{k}_joint") for k in ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
+                                                         "wrist_roll", "wrist_pitch", "wrist_yaw"))]
+                fin = [int(ds[j]) for j, lb in enumerate(labels) if lb.startswith("g1/") and "dex1_finger_joint" in lb]
+                self._settle_idx = (np.array(arm, int), np.array(fin, int))
+            else:
+                self._settle_idx = (np.arange(7), np.arange(7, 9))
+        return self._settle_idx
+
     def settled(self) -> bool:
-        qd = self.rig.s0.joint_qd.numpy()[:ARM_DOF]
-        return bool(np.abs(qd[:7]).max() < self.SETTLE_ARM_RAD_S and np.abs(qd[7:9]).max() < self.SETTLE_FINGER_M_S)
+        arm, fin = self._settle_dofs()
+        qd = self.rig.s0.joint_qd.numpy()
+        return bool(np.abs(qd[arm]).max() < self.SETTLE_ARM_RAD_S and np.abs(qd[fin]).max() < self.SETTLE_FINGER_M_S)
 
     def charge_settled(self, owed_s: float) -> float:
         """Charged mode (sims/clockwork/CONTRACT.md): while a request is out the world keeps stepping, last targets

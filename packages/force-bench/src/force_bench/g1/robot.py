@@ -405,10 +405,40 @@ class ContactPeak:
                 "frames_above_logged": self.log}
 
 
+# The policy cameras of our Isaac G1 tasks (unibot-scene-spec.md section 5, harness state): G1_CAMERAS=spec (default)
+# or npz (the exported MuJoCo cameras, the earlier records).  Poses are ROS optical frames (x right, y down, z forward)
+# in the parent link, as IsaacLab's OffsetCfg(convention="ros"); (w, x, y, z).
+SPEC_CAMERAS = {
+    "head": {"body": "d435_link", "pos": (0.0, 0.0, 0.0), "ros_q": (0.4912, -0.50865, 0.50865, -0.4912),
+             "fx_px": 243.2, "size": (640, 480),
+             "source": "spec 5.2 + 8: the left eye front_camera at the d435_link origin, the harness's stock focal 7.6 "
+                       "mm (fx 243.2 at 640 px) and its 2 deg tilt; d435_link matches the spec's fixed joint"},
+    "wrist": {"body": "{side}_hand_base_link", "pos": {"left": (0.02541028, 0.045, 0.135),
+                                                       "right": (-0.02541028, 0.045, 0.135)},
+              "ros_q": (-0.34202, 0.93969, 0.0, 0.0), "fx_px": 384.0, "size": (640, 480),
+              "source": "spec 5.3: the default 'preset' wrist mount (upstream camera_configs.py), focal 12 / aperture "
+                        "20 mm (fx 384 px)"},
+}
+G1_CAMERAS = os.environ.get("G1_CAMERAS", "spec")
+
+
+def _spec_mount(label: str, side: str):
+    c = SPEC_CAMERAS[label]
+    w, x, y, z = c["ros_q"]
+    T = np.eye(4)
+    T[:3, :3] = _rot((w, x, y, z)) @ np.diag([1.0, -1.0, -1.0])     # ROS optical -> GL (-z forward, +y up)
+    pos = c["pos"][side] if isinstance(c["pos"], dict) else c["pos"]
+    T[:3, 3] = pos
+    fovy = float(np.degrees(2.0 * np.arctan(0.5 * c["size"][1] / c["fx_px"])))
+    return (label, PREFIX + c["body"].format(side=side), T, fovy)
+
+
 def camera_mounts(npz_path, side: str) -> list:
     """The G1's own cameras from the exported model, as PolicyCameras mounts [(name, body label, T_body_cam, fovy)]:
     the head camera (the d435 mount, Isaac's g1_front_camera; the left of the challenge's head pair) and the active
     hand's wrist camera.  MuJoCo cameras look along -z with +y up, the GL convention the renderer uses."""
+    if G1_CAMERAS == "spec":
+        return [_spec_mount("head", side), _spec_mount("wrist", side)]
     d = np.load(npz_path, allow_pickle=False)
     if "cam_name" not in d:
         return []
