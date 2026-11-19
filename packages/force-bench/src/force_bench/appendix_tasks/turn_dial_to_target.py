@@ -406,7 +406,8 @@ def run(dial: str, knob: str, target_deg: float, name: str | None = None, seed: 
         from force_bench.g1.robot import solver_options_readback
         Path(rig.out_dir, "fr3_contact_trace.jsonl").write_text("\n".join(json.dumps(r) for r in ex.diag_rows))
         Path(rig.out_dir, "fr3_contact_shapes.json").write_text(json.dumps(
-            {**ex.diag_shapes, "solver_options_runtime": solver_options_readback(rig.solver)}, indent=1))
+            {**ex.diag_shapes, "solver_options_runtime": solver_options_readback(rig.solver),
+             "dial_bar_collider": h.info.get("bar_collider") or {"type": "mesh"}}, indent=1))
     paths = rig.rec.save("rollout", force_keys=["pads_N", "robot_object_contact_N"])
     return verdict(rig, h, g, ex, dial, knob, target_deg, key, choice, paths, seed, start)
 

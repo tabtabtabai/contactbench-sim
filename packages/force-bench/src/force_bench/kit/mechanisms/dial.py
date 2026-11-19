@@ -125,6 +125,8 @@ MEASURED (``force-bench kit check``, default quality, impratio 10; flat / round 
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import trimesh
 import warp as wp
@@ -268,6 +270,42 @@ def _add_mesh(rig, body: int, tm: trimesh.Trimesh, body_from_mesh: np.ndarray, l
     return sid
 
 
+# The flat knob's bar as an exact box for the ROBOT's contacts (TB_DIAL_BAR_COLLIDER=box; a diagnosis A/B, off by
+# default).  From the CAD (dial_knob_flat.stl): the bar's faces are flat and vertical at y = +-5.01 mm from z ~30 to
+# 51 mm; it tapers along its length from |x| 20.9 mm (z 40) to 19.6 mm (z 50), so the box keeps |x| <= 19.5 mm to
+# stay inside the drawn bar.  The top fillet (51.3-53 mm), the base fillet (28-30 mm), the hub and the skirt stay mesh
+# for everything else; the robot's shapes are filtered from the knob mesh, so they touch the knob only through the box.
+BAR_BOX_MM = {"half_x": 19.5, "half_y": 5.01, "z_lo": 30.0, "z_hi": 51.0}
+
+
+def _bar_box_collider(rig, h, knob, knob_from_cad, mu):
+    b = BAR_BOX_MM
+    c_cad = np.array([0.0, 0.0, 0.5 * (b["z_lo"] + b["z_hi"])]) * MM
+    T = knob_from_cad @ pose_matrix(xyz=c_cad)
+    cfg = rig.cfg(mu=mu)
+    cfg.density = 0.0                          # the knob's mass and inertia stay the mesh part's
+    sid = rig.builder.add_shape_box(knob, xform=to_wp(T), hx=b["half_x"] * MM, hy=b["half_y"] * MM,
+                                    hz=0.5 * (b["z_hi"] - b["z_lo"]) * MM, cfg=cfg,
+                                    label=f"kit/{h.label}/dial_knob_bar_box")
+    _torsion(rig, [sid])
+    sid_k = h.shapes[[k for k in h.shapes if "knob_flat" in k][0]][0]
+    robot = [i for i, lb in enumerate(rig.builder.shape_label)
+             if rig.builder.shape_body[i] >= 0 and str(rig.builder.body_label[rig.builder.shape_body[i]]).startswith(("fr3/", "g1/"))]
+    for r in robot:
+        rig.builder.add_shape_collision_filter_pair(sid_k, r)
+    others = [s for s in range(len(rig.builder.shape_label)) if rig.builder.shape_body[s] != knob and s not in robot]
+    for s in others:                           # the box is the robot's only: everything else keeps the knob mesh
+        rig.builder.add_shape_collision_filter_pair(sid, s)
+    h.shapes.setdefault("dial_knob_bar_box", []).append(sid)
+    h.info["bar_collider"] = {"type": "box", "half_extents_mm": [b["half_x"], b["half_y"], 0.5 * (b["z_hi"] - b["z_lo"])],
+                              "cad_z_mm": [b["z_lo"], b["z_hi"]],
+                              "source": "dial_knob_flat.stl: flat vertical bar faces at y = +-5.01 mm, z 30-51 mm; "
+                                        "length kept inside the bar's taper (|x| <= 19.5 mm)",
+                              "robot_contacts": "the box only (the robot's shapes are filtered from the knob mesh)",
+                              "other_contacts": "the knob mesh, unchanged (the box is filtered from every non-robot shape)",
+                              "robot_shapes_filtered": len(robot)}
+
+
 def _torsion(rig, sids):
     for s in sids:
         rig.builder.shape_material_mu_torsional[s] = MU_TORSION
@@ -341,6 +379,8 @@ def build(rig, asset, h, **params) -> None:
     h.bodies["knob"] = knob
     for s in statics:
         rig.builder.add_shape_collision_filter_pair(sid_k, s)
+    if os.environ.get("TB_DIAL_BAR_COLLIDER") == "box" and "knob_flat" in knob_p.name:
+        _bar_box_collider(rig, h, knob, knob_from_cad, mu)
 
     if kind == "push":
         _build_push(rig, asset, h, roles, g, knob, sid_k, world_from_knob, m_knob, mu, params)

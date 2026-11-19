@@ -148,7 +148,8 @@ def main(argv=None):
                                            "share_at_cone_edge_0.99": round(float(np.mean(np.array(ratio) > 0.99)), 3) if ratio else None},
                "count_per_jaw_max": [max(r["count_jaw1"] for r in log), max(r["count_jaw2"] for r in log)],
                "min_sep_mm": round(min((c["sep_mm"] for c in allc), default=0.0), 3),
-               "solver_options_runtime": G1R.solver_options_readback(rig.solver)}
+               "solver_options_runtime": G1R.solver_options_readback(rig.solver),
+               "dial_bar_collider": h.info.get("bar_collider") or {"type": "mesh"}}
     (rig.out_dir / "hand_only_summary.json").write_text(json.dumps(summary, indent=1))
     print("SUMMARY", json.dumps(summary), flush=True)
 

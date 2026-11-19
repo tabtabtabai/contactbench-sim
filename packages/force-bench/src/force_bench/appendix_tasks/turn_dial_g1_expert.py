@@ -556,6 +556,7 @@ def main(argv=None):
         "dial_turn_window_needed_deg": round(math.degrees(TURN_NEED), 1),
         "dial_tip_lift_m": tip_lift, "dial_rotate_max_rad_s": ROTATE_MAX,
         "dial_lever_config": os.environ.get("G1_LEVER"),          # the dial-lever matrix's label (diagnostics)
+        "dial_bar_collider": h.info.get("bar_collider") or {"type": "mesh", "source": "the knob mesh (kit default)"},
         "dial_finger_damping": {
             "kd_N_s_per_m": round(float(rig.model.joint_target_kd.numpy()[fdofs[0]]), 3),
             "multiplier": float(os.environ.get("G1_FINGER_KD_SCALE", 1.0)),
