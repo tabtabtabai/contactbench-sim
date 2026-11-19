@@ -149,7 +149,10 @@ REGRASP = os.environ.get("G1_DIAL_REGRASP", "0") == "1"
 STROKE_MAX = math.radians(60.0)
 STROKE_MIN = math.radians(10.0)
 LIFT = 0.030                         # m the open hand rises between strokes (the tips clear the bar's 53 mm top)
-DRIFT_TOL = math.radians(T.HALF_TICK_DEG)   # the brake must hold the dial within half a tick while the jaws are open
+DRIFT_TOL = math.radians(T.HALF_TICK_DEG)
+F_WIDE = DEX1_HALF_GAP_OPEN = 0.0416   # FR3-dof terms for the Dex1 fully open (83 mm): between strokes the jaws come
+#                                        down onto the bar wide (the expert's 6 mm clearance landed a finger on the bar:
+#                                        37 kN, the dial knocked back 20 deg)   # the brake must hold the dial within half a tick while the jaws are open
 
 
 def band_mask(ik, axis, z, step_deg=5.0):
@@ -259,13 +262,13 @@ class G1DialRegraspExpert(G1DialExpert):
         z0 = self.tcp0[2]
         if ph == "r_open":
             u = T.ease(tau / T.T_OPEN)
-            self._drive_abs(st["r_yaw"], z0, self.f_grip + (self.f_open - self.f_grip) * u)
+            self._drive_abs(st["r_yaw"], z0, self.f_grip + (F_WIDE - self.f_grip) * u)
             if tau >= T.T_OPEN:
                 self.go("r_lift", t)
             return
         if ph == "r_lift":
             u = T.ease(tau / 0.6)
-            self._drive_abs(st["r_yaw"], z0 + LIFT * u, self.f_open)
+            self._drive_abs(st["r_yaw"], z0 + LIFT * u, F_WIDE)
             if tau >= 0.6:
                 remaining = self.target_final - ang
                 nxt = stroke_from(self.ys, self.ok, self.bar_yaw0 + ang, remaining)
@@ -283,17 +286,18 @@ class G1DialRegraspExpert(G1DialExpert):
             return
         if ph == "r_rotate":
             u = T.ease(tau / st["r_T"])
-            self._drive_abs(st["r_from"] + (st["r_to"] - st["r_from"]) * u, z0 + LIFT, self.f_open)
+            self._drive_abs(st["r_from"] + (st["r_to"] - st["r_from"]) * u, z0 + LIFT, F_WIDE)
             if tau >= st["r_T"]:
                 self.go("r_lower", t)
             return
         if ph == "r_lower":
             u = T.ease(tau / 0.6)
-            self._drive_abs(st["r_to"], z0 + LIFT * (1 - u), self.f_open)
+            self._drive_abs(st["r_to"], z0 + LIFT * (1 - u), F_WIDE)
             if tau >= 0.6:
                 drift = ang - st["r_ang"]
                 self._begin(st["r_to"], st["r_next"][1], ang, drift)
-                self.go("close", t)
+                self.f_open = F_WIDE                   # the next close ramps in from wide open (the FR3 close:
+                self.go("close", t)                    # its first 60 % under the xy servo)
             return
         if (ph in ("open", "retreat", "still") and self.strokes and "from_deg" in self.strokes[-1]
                 and "turned_deg" not in self.strokes[-1]):
