@@ -8,6 +8,11 @@
 // An int32 magic of 0 ends the session.
 //
 // usage: filament_server scene.glb body_names.txt (ibl.ktx sh.txt | - -) WxH ncams [ibl_lux sun_lux] [key=value ...]
+//        filament_server --device-check   (print the Vulkan devices; exit 0 only if a GPU device is present)
+//
+// At startup the server logs every Vulkan physical device ("[filament] vulkan device: NAME (TYPE)") and refuses to
+// render (exit 6) when the only devices are CPU implementations such as lavapipe/llvmpipe: a software device renders
+// the same pixels ~100x slower, which realtime scoring would charge to the policy.
 #include <filament/Camera.h>
 #include <filament/Engine.h>
 #include <filament/ColorGrading.h>
@@ -40,6 +45,7 @@
 #include <math/vec4.h>
 #include <math/quat.h>
 #include <utils/EntityManager.h>
+#include <bluevk/BlueVK.h>
 
 #include <cmath>
 #include <cstdio>
@@ -63,7 +69,37 @@ static std::vector<uint8_t> readFile(const char* path) {
 
 static bool readAll(void* dst, size_t n) { return std::fread(dst, 1, n, stdin) == n; }
 
+// Every Vulkan physical device the loader offers, logged to stderr; true when at least one is not a CPU device.
+static bool vulkanHasGpu() {
+    if (!bluevk::initialize()) { std::fprintf(stderr, "[filament] vulkan: cannot load libvulkan.so.1\n"); return false; }
+    VkApplicationInfo app{}; app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO; app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO; ci.pApplicationInfo = &app;
+    VkInstance inst = VK_NULL_HANDLE;
+    VkResult r = bluevk::vkCreateInstance(&ci, nullptr, &inst);
+    if (r != VK_SUCCESS) { std::fprintf(stderr, "[filament] vulkan: vkCreateInstance failed (%d): no usable ICD\n", (int) r); return false; }
+    bluevk::bindInstance(inst);
+    uint32_t n = 0;
+    bluevk::vkEnumeratePhysicalDevices(inst, &n, nullptr);
+    std::vector<VkPhysicalDevice> devs(n);
+    if (n) bluevk::vkEnumeratePhysicalDevices(inst, &n, devs.data());
+    bool gpu = false;
+    for (auto d : devs) {
+        VkPhysicalDeviceProperties p{};
+        bluevk::vkGetPhysicalDeviceProperties(d, &p);
+        const char* type = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete GPU"
+                         : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated GPU"
+                         : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? "virtual GPU"
+                         : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "CPU" : "other";
+        std::fprintf(stderr, "[filament] vulkan device: %s (%s)\n", p.deviceName, type);
+        if (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) gpu = true;
+    }
+    if (!n) std::fprintf(stderr, "[filament] vulkan: no physical devices\n");
+    bluevk::vkDestroyInstance(inst, nullptr);
+    return gpu;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--device-check") return vulkanHasGpu() ? 0 : 6;
     if (argc < 7) { std::cerr << "usage: filament_server scene.glb names.txt ibl.ktx sh.txt WxH ncams [ibl_lux sun_lux]\n"; return 1; }
     int W = 0, H = 0; std::sscanf(argv[5], "%dx%d", &W, &H);
     int ncams = std::atoi(argv[6]);
@@ -90,6 +126,10 @@ int main(int argc, char** argv) {
     dup2(STDERR_FILENO, STDOUT_FILENO);
     FILE* data = fdopen(dataFd, "wb");
 
+    if (!vulkanHasGpu()) {
+        std::fprintf(stderr, "[filament] refusing to render: no GPU Vulkan device (a CPU device would be ~100x slower)\n");
+        return 6;
+    }
     Engine* engine = Engine::create(Engine::Backend::VULKAN);
     Renderer* renderer = engine->createRenderer();
     Scene* scene = engine->createScene();
