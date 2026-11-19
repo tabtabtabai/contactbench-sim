@@ -34,6 +34,7 @@ import force_bench.appendix_tasks.turn_dial_to_target as T
 from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, appendix_rig, sample_start
 from force_bench.appendix_tasks.install_light_bulb_g1 import (FLOOR_CB, PELVIS_Z_CB, TABLE_HALF, WRIST_MAX, dex1_q,
                                                               render_start)
+from force_bench.g1.robot import add_rule_a_probes
 from force_bench.g1.robot import (PREFIX, ContactPeak, G1IK, MagnitudeProbe, SumProbe, TorqueMonitor, add_g1, apply_look,
                                   camera_mounts, cap_headroom, effective_arm_caps, finger_readback, floor_and_table,
                                   gravity_torques, init_pose, sim_cap_readback)
@@ -393,6 +394,7 @@ def main(argv=None):
               "robot_object": RobotContactProbe(rig.model, moving, static_shapes=static_labels)}
     rig.probes.update(probes)
     rig.pad_probes = ("finL", "finR")
+    add_rule_a_probes(rig, SIDE)                            # rule A: the sum of contact magnitudes
     rig.contact_peak = rig.probes["g1/contact"] = ContactPeak(rig.model)
     rig.camera_mounts = camera_mounts(a.model, SIDE)
     apply_look(rig.model, g1)

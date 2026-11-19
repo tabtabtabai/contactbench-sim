@@ -29,6 +29,7 @@ import warp as wp
 
 import force_bench.appendix_tasks._kit_thread as kt
 from force_bench.appendix_tasks.common import RobotContactProbe, appendix_rig, sample_start
+from force_bench.g1.robot import add_rule_a_probes
 from force_bench.g1.robot import (DEX1_HALF_GAP0, PREFIX, ContactPeak, G1IK, TorqueMonitor, add_g1, apply_look,
                                   camera_mounts, cap_headroom, effective_arm_caps, floor_and_table,
                                   gravity_torques, init_pose, sim_cap_readback)
@@ -216,6 +217,7 @@ def setup(a, name):
                                        S.axis_xy),
                   "robot_object": RobotContactProbe(rig.model, [P.kind], static_shapes=S.static_labels)}
     rig.contact_peak = rig.probes["g1/contact"] = ContactPeak(rig.model)
+    add_rule_a_probes(rig, SIDE)                            # rule A: the sum of contact magnitudes
     cj = int(np.flatnonzero(rig.model.joint_child.numpy() == S.part)[0])
     rig.solver = kt.ProbeTorque(rig.solver, int(rig.model.joint_qd_start.numpy()[cj]) + 5)
     rig.camera_mounts = camera_mounts(a.model, SIDE)

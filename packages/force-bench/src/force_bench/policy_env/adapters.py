@@ -112,13 +112,18 @@ class Adapter:
         return FORCE_LIMIT_N
 
     def _force(self, t, f, summed=False):
+        rp = getattr(self.rig, "rule_a_probes", None)   # a row with rule-A finger probes (the sum of contact
+        if rp:                                           # magnitudes, contract #1773): the limit reads those
+            f = max((self.rig.probes[l].history[-1]["force"] for l in rp if self.rig.probes[l].history), default=0.0)
         """f: the larger of the two pad forces this frame (N)."""
         lim = FORCE_LIMIT_N
         self.peak_pad_n = max(getattr(self, "peak_pad_n", 0.0), float(f))
         self.over = self.over + 1 if f > lim else 0
         if self.over == FORCE_LIMIT_FRAMES:
             cp = getattr(self.rig, "contact_peak", None)     # which contact is behind it, when the rig logs pairs
-            self._fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=lim, measured="per pad",
+            self._fatal(t, "force_limit", peak_N=round(float(f), 1), limit_N=lim,
+                        measured=("per finger, the sum of contact magnitudes (contract #1773)"
+                                  if getattr(self.rig, "rule_a_probes", None) else "per pad"),
                         **({"contacts": cp.top, "peak_contact": cp.peak} if cp is not None else {}))
 
     def _fatal(self, t, kind, **kw):

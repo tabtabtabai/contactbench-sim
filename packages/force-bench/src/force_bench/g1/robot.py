@@ -625,8 +625,9 @@ class MagnitudeProbe:
         bodies = [blab.index(b) for b in body_labels]
         self.mine = np.isin(sb, bodies)
         labels = [str(x or "") for x in model.shape_label]
+        robot = np.array([b >= 0 and blab[b].startswith(PREFIX) for b in sb], bool)
         self.other = (np.isin(np.arange(len(labels)), [labels.index(s) for s in counterpart_shapes])
-                      if counterpart_shapes else np.ones(len(labels), bool))
+                      if counterpart_shapes else ~robot)           # default: against every non-robot shape
         self.history = []
 
     def sample(self, contacts, state, t):
@@ -644,3 +645,15 @@ class MagnitudeProbe:
                 rec["force"] = float(np.linalg.norm(f.numpy()[:n][sel][:, :3].astype(float), axis=1).sum())
         self.history.append(rec)
         return rec
+
+
+def add_rule_a_probes(rig, side: str, net_probes=None) -> tuple:
+    """Rule A's per-finger force (contract #1773): each Dex1 jaw (hand_Link{k}_2 + hand_Link{k}_3) as the sum of its
+    contact magnitudes against every non-robot shape, registered as rig.probes["g1/finger{k}"] and rig.rule_a_probes
+    (the adapters' force limit reads them).  ``net_probes``: the row's own net-vector finger probes, kept alongside
+    (rig.net_probes) for comparison."""
+    for k in (1, 2):
+        rig.probes[f"g1/finger{k}"] = MagnitudeProbe(rig.model, [f"{PREFIX}{side}_hand_Link{k}_{j}" for j in (2, 3)])
+    rig.rule_a_probes = ("g1/finger1", "g1/finger2")
+    rig.net_probes = tuple(net_probes or ())
+    return rig.rule_a_probes

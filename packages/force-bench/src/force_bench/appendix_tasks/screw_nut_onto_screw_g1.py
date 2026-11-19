@@ -33,6 +33,7 @@ from force_bench.appendix_tasks.common import (RobotContactProbe, appendix_rig, 
                                                save_appendix_verdict)
 from force_bench.appendix_tasks.install_light_bulb_g1 import (FLOOR_CB, PELVIS_Z_CB, TABLE_HALF, WRIST_MAX, dex1_q,
                                                               wrist_window)
+from force_bench.g1.robot import add_rule_a_probes
 from force_bench.g1.robot import (PREFIX, ContactPeak, G1IK, SumProbe, TorqueMonitor, add_g1, apply_look,
                                   camera_mounts, cap_headroom, effective_arm_caps, floor_and_table, gravity_torques,
                                   init_pose, sim_cap_readback)
@@ -156,6 +157,7 @@ def main(argv=None):
         "robot_object": RobotContactProbe(rig.model, ["nut"], static_shapes=["bolt"]),
     }
     rig.pad_probes = ("finL", "finR")
+    add_rule_a_probes(rig, SIDE, net_probes=rig.pad_probes)  # rule A: the sum of contact magnitudes
     rig.contact_peak = rig.probes["g1/contact"] = ContactPeak(rig.model)
     rig.finger_bodies = NA.FINGER_BODIES
     rig.solver = make_solver(rig.model, iterations=20)

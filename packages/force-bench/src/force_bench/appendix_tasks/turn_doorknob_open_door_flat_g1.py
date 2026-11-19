@@ -39,6 +39,7 @@ from force_bench.appendix_tasks._door_kit import (LOCK_PROBE_NM, LOCK_PROBE_S, H
                                                   door_pose, drawn_shapes, joint_reader, lock_probe_check,
                                                   pads_check)
 from force_bench.appendix_tasks.common import StopRun, appendix_rig
+from force_bench.g1.robot import add_rule_a_probes
 from force_bench.g1.robot import (ContactPeak, SumProbe, add_g1, apply_look, camera_mounts, cap_headroom,
                                   effective_arm_caps, floor_and_table, init_pose, q_indices,
                                   sim_cap_readback, TorqueMonitor)
@@ -124,6 +125,7 @@ def main(argv=None):
     for i in (1, 2):                             # each pad = its finger's two links
         rig.probes[f"g1/pad{i}"] = SumProbe([rig.probes.pop(lb) for lb in links[i]])
     rig.pad_probes = ("g1/pad1", "g1/pad2")
+    add_rule_a_probes(rig, side, net_probes=rig.pad_probes)   # rule A: the sum of contact magnitudes
     rig.arm_caps = effective_arm_caps(rig.model, g1)   # read back from the model; refuses an uncapped arm
     rig.contact_peak = rig.probes["g1/contact"] = ContactPeak(rig.model)   # names the pair behind any force peak
     rig.camera_mounts = camera_mounts(a.model, side)
