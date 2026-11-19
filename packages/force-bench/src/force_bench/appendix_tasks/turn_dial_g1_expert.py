@@ -336,6 +336,10 @@ def main(argv=None):
             rig.builder.shape_gap[i] = T.ROBOT_GAP
     fingers = [f"{SIDE}_dex1_finger_joint_1", f"{SIDE}_dex1_finger_joint_2"]
     fdofs = [int(rig.builder.joint_qd_start[g1["joints"][n]]) for n in fingers]
+    kd_scale = float(os.environ.get("G1_FINGER_KD_SCALE", 1.0))   # finger damping x the Dex1's own (recorded)
+    if REGRASP and kd_scale != 1.0:
+        for d in fdofs:
+            rig.builder.joint_target_kd[d] = rig.builder.joint_target_kd[d] * kd_scale
     if not REGRASP:                                          # the FR3 row's own finger drive (the single-grasp
         for d in fdofs:                                      # set); the regrasp set keeps the Dex1's own gain:
             rig.builder.joint_target_ke[d] = T.FINGER_KE     # 20 kN/m on the Dex1 fingers chattered through the bar
@@ -489,7 +493,8 @@ def main(argv=None):
         "dial_twist_rad_s": float(T.OMEGA),
         "dial_twist_source": "the FR3 expert's 45 deg/s wrist ramp, inside the G1 rule (<= 0.9 rad/s)",
         "dial_turn_window_needed_deg": round(math.degrees(TURN_NEED), 1),
-        "dial_tip_lift_m": tip_lift, "dial_rotate_max_rad_s": ROTATE_MAX}
+        "dial_tip_lift_m": tip_lift, "dial_rotate_max_rad_s": ROTATE_MAX,
+        "dial_finger_kd_scale": float(os.environ.get("G1_FINGER_KD_SCALE", 1.0))}
     (rig.out_dir / "g1_plan.json").write_text(json.dumps(rig.g1_plan, indent=1))
 
     # ── the drive the FR3 expert calls ──────────────────────────────────────────────────────────────────────
@@ -538,7 +543,7 @@ def main(argv=None):
     print(f"[{NAME}] seed {a.seed}: dial {np.round(axis * 1e3, 1).tolist()} mm, yaw {math.degrees(yaw0):+.1f}; "
           f"grasp yaw {math.degrees(a0):+.1f} (turn to {math.degrees(a0 + TURN_NEED):+.1f}); "
           f"ff budget {np.round(budget, 2).tolist()} N.m", flush=True)
-    duration = 16.0 + abs(TARGET_DEG) / 45.0
+    duration = 16.0 + abs(TARGET_DEG) / 45.0 + (24.0 if REGRASP else 0.0)   # strokes take longer than one turn
     try:
         rig.run(min(duration, float(os.environ.get("G1_MAX_T", duration))), ex.control, ex.extra)
     except StopRun:
