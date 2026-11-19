@@ -33,7 +33,7 @@ import newton
 import force_bench.appendix_tasks.turn_dial_to_target as T
 from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, appendix_rig, sample_start
 from force_bench.appendix_tasks.install_light_bulb_g1 import (FLOOR_CB, PELVIS_Z_CB, TABLE_HALF, WRIST_MAX, dex1_q,
-                                                              render_start, wrist_window)
+                                                              render_start)
 from force_bench.g1.robot import (PREFIX, ContactPeak, G1IK, SumProbe, TorqueMonitor, add_g1, apply_look,
                                   camera_mounts, cap_headroom, effective_arm_caps, finger_readback, floor_and_table,
                                   gravity_torques, init_pose, sim_cap_readback)
@@ -48,6 +48,7 @@ STANCE = tuple(float(v) for v in os.environ.get("G1_DIAL_STANCE", "0.30,0.00").s
 DIAL, KNOB, TARGET_DEG = "standard", "flat", 90.0
 DEX1_TIP_PAST_PAD = 0.0273           # top-down: the fingertips this far below the pad centre (the FR3's are 9.93 mm)
 TURN_NEED = math.radians(TARGET_DEG) + T.EXPERT_TRIM_CLAMP + math.radians(5.0)
+MARGIN = math.radians(10.0)          # IK checked this far past both ends of the turn
 assert T.OMEGA <= WRIST_MAX   # the turn, its trim and a margin
 LAST_MISS: dict = {}
 
@@ -60,13 +61,28 @@ def parse(argv=None):
     return ap.parse_args(argv)
 
 
-def _fit(yaw0, lo, hi):
-    """A grasp yaw a in {yaw0, yaw0 + pi} (+ 2 pi k) with [a, a + TURN_NEED] inside [lo, hi], or None."""
+def turn_fit(ik, axis, z, yaw0, gravity_joints):
+    """The grasp yaw for the dial's turn: for the bar's yaw and its 180-deg twin (+ 2 pi k, kept within +-pi of 0),
+    walk the top-down IK from the turn's top (a + TURN_NEED + MARGIN) down to its start (a - MARGIN) in 5-deg steps
+    at the grasp height.  Returns (a, q at a, the largest |gravity torque| per arm joint over the walk) or None."""
+    from force_bench.appendix_tasks.install_light_bulb_g1 import IK_TOL
+    q_home = ik.joint_q.numpy().copy()
+    p = np.array([axis[0], axis[1], z])
     for base in (yaw0, yaw0 + math.pi):
-        for k in range(-2, 3):
-            a = base + 2 * math.pi * k
-            if lo - 1e-9 <= a and a + TURN_NEED <= hi + 1e-9:
-                return a
+        a = math.remainder(base, 2 * math.pi)
+        ys = np.arange(a + TURN_NEED + MARGIN, a - MARGIN - 1e-9, -math.radians(5.0))
+        ik.joint_q.assign(q_home)
+        ik.solve(p, down_grasp_quat(ys[0]), iterations=96)
+        gmax, ok = np.zeros(len(ik.arm)), True
+        for y in ys:
+            ik.solve(p, down_grasp_quat(y), iterations=24)
+            if max(e / tol for e, tol in zip(ik.residual(p, down_grasp_quat(y)), IK_TOL)) > 1.0:
+                ok = False
+                break
+            gmax = np.maximum(gmax, np.abs(gravity_torques(ik.model, ik._state().body_q.numpy(), gravity_joints)))
+        if ok:
+            ik.solve(p, down_grasp_quat(a), iterations=48)
+            return a, ik.joint_q.numpy().copy(), gmax
     return None
 
 
@@ -127,23 +143,17 @@ def main(argv=None):
     ik = G1IK(a.model, pelvis, SIDE, start_q)
     ik.arm_joints = [ik.g1["joints"][n] for n in ik.arm]
     jmap = {n: g1["joints"][n] for n in ik.arm}
+    fit = turn_fit(ik, axis, tcp0[2], yaw0, ik.arm_joints)
     miss = None
-    try:
-        hi, lo, q_hi, gmax = wrist_window(ik, axis, tcp0[2], tcp0[2])
-        a0 = _fit(yaw0, lo, hi)
-        if a0 is None:
-            LAST_MISS.update(dial_xy_m=[round(float(v), 4) for v in axis], dial_yaw_deg=round(math.degrees(yaw0), 1),
-                             window_deg=[round(math.degrees(lo), 1), round(math.degrees(hi), 1)],
-                             needed_deg=round(math.degrees(TURN_NEED), 1))
-            raise SystemExit(f"{NAME}: no top-down wrist window reaches the dial's turn: the window "
-                             f"{math.degrees(lo):+.0f}..{math.degrees(hi):+.0f} deg holds no {math.degrees(TURN_NEED):.0f}"
-                             f" deg turn from the bar's yaw ({math.degrees(yaw0):+.1f} or +180)")
-    except SystemExit as e:
-        if "no top-down wrist window" not in str(e):
-            raise
-        if not LAST_MISS:
-            LAST_MISS.update(dial_xy_m=[round(float(v), 4) for v in axis], dial_yaw_deg=round(math.degrees(yaw0), 1))
-        miss, gmax = e, np.zeros(len(ik.arm))
+    if fit is None:
+        LAST_MISS.update(dial_xy_m=[round(float(v), 4) for v in axis], dial_yaw_deg=round(math.degrees(yaw0), 1),
+                         needed_deg=round(math.degrees(TURN_NEED + 2 * MARGIN), 1))
+        miss = SystemExit(f"{NAME}: no top-down wrist window reaches the dial's turn: neither from the bar's yaw "
+                          f"({math.degrees(yaw0):+.1f}) nor its 180-deg twin does the IK follow a "
+                          f"{math.degrees(TURN_NEED + 2 * MARGIN):.0f} deg top-down turn at the grip")
+        gmax = np.zeros(len(ik.arm))
+    else:
+        a0, q_a0, gmax = fit
     budget = gmax + 0.5
     rig.effort_budget = cap_headroom(rig.builder, g1, ik.arm, budget)
     qs_b = rig.builder.joint_q_start
@@ -152,13 +162,9 @@ def main(argv=None):
             rig.builder.joint_q[int(qs_b[g1["joints"][n]])] = float(v)
             rig.builder.joint_target_q[int(qs_b[g1["joints"][n]])] = float(v)
     ik_qs = ik.model.joint_q_start.numpy()
-    if miss is None:                                         # walk the IK from the window's top down to the grasp yaw
-        ik.joint_q.assign(q_hi)
-        for u in np.linspace(0.0, 1.0, 24):
-            q_sol = ik.solve(tcp0, down_grasp_quat(hi + u * (a0 - hi)), iterations=24)
-        q_sol = ik.solve(tcp0, down_grasp_quat(a0), iterations=96)
+    if miss is None:                                         # the arm at the grasp yaw, on the walked branch
         for n in ik.arm:
-            v = float(q_sol[int(ik_qs[ik.g1["joints"][n]])])
+            v = float(q_a0[0][int(ik_qs[ik.g1["joints"][n]])] if q_a0.ndim == 2 else q_a0[int(ik_qs[ik.g1["joints"][n]])])
             rig.builder.joint_q[int(qs_b[jmap[n]])] = v
             rig.builder.joint_target_q[int(qs_b[jmap[n]])] = v
     f_open = g["half"] + T.PAD_OFF + T.OPEN_CLEAR
@@ -191,8 +197,10 @@ def main(argv=None):
     if miss is not None:                                     # the start frame, then the miss
         rig.start_videos = render_start(rig)
         raise miss
-    rig.g1_plan.update(wrist_window_deg=[round(math.degrees(lo), 1), round(math.degrees(hi), 1)],
-                       grasp_yaw_deg=round(math.degrees(a0), 1), grasp_side="far" if abs(a0 - yaw0) > 1 else "near")
+    rig.g1_plan.update(turn_window_deg=[round(math.degrees(a0 - MARGIN), 1),
+                                        round(math.degrees(a0 + TURN_NEED + MARGIN), 1)],
+                       grasp_yaw_deg=round(math.degrees(a0), 1),
+                       grasp_side="near" if abs(math.remainder(a0 - yaw0, 2 * math.pi)) < 1 else "far (180-deg twin)")
     rig.finger_params = finger_readback(rig.solver, rig.model, g1, SIDE,
                                         overdrive_m=1.5 * T.SQUEEZE[KNOB] / T.FINGER_KE)
     rig.variant_extra = {
@@ -236,7 +244,7 @@ def main(argv=None):
     tips = [rig.body_index(f"{PREFIX}{SIDE}_hand_Link{i}_3") for i in (1, 2)]
     ex = G1DialExpert(rig, h, DIAL, KNOB, math.radians(TARGET_DEG), g, probes, tips, a0)
     print(f"[{NAME}] seed {a.seed}: dial {np.round(axis * 1e3, 1).tolist()} mm, yaw {math.degrees(yaw0):+.1f}; "
-          f"window {math.degrees(lo):+.0f}..{math.degrees(hi):+.0f} deg; grasp yaw {math.degrees(a0):+.1f}; "
+          f"grasp yaw {math.degrees(a0):+.1f} (turn to {math.degrees(a0 + TURN_NEED):+.1f}); "
           f"ff budget {np.round(budget, 2).tolist()} N.m", flush=True)
     duration = 16.0 + abs(TARGET_DEG) / 45.0
     try:
