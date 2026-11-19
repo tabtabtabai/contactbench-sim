@@ -612,3 +612,35 @@ def finger_readback(solver, model, g1: dict, side: str, overdrive_m: float, tag:
         out[jn] = {"forcerange_N": round(hi, 2), "kp_N_per_m": round(kp, 1), "overdrive_mm": round(overdrive_m * 1e3, 2),
                    "commanded_squeeze_N": round(sq, 2)}
     return out
+
+
+class MagnitudeProbe:
+    """One finger's contact force as the SUM OF CONTACT MAGNITUDES over its shapes (optionally against the given
+    counterpart shapes): unlike a net (vector) total, contacts on opposite faces of a thin part do not cancel, so a
+    finger box chattering through a bar shows its real load.  ForceProbe-compatible (sample / history)."""
+
+    def __init__(self, model, body_labels, counterpart_shapes=None):
+        sb = model.shape_body.numpy()
+        blab = [str(b) for b in model.body_label]
+        bodies = [blab.index(b) for b in body_labels]
+        self.mine = np.isin(sb, bodies)
+        labels = [str(x or "") for x in model.shape_label]
+        self.other = (np.isin(np.arange(len(labels)), [labels.index(s) for s in counterpart_shapes])
+                      if counterpart_shapes else np.ones(len(labels), bool))
+        self.history = []
+
+    def sample(self, contacts, state, t):
+        rec = {"t": t, "force": 0.0, "friction": 0.0}
+        f = getattr(contacts, "force", None)
+        n = int(contacts.rigid_contact_count.numpy()[0]) if f is not None else 0
+        if n > 0:
+            n = min(n, len(contacts.rigid_contact_shape0))
+            s0 = contacts.rigid_contact_shape0.numpy()[:n].astype(int)
+            s1 = contacts.rigid_contact_shape1.numpy()[:n].astype(int)
+            ok = (s0 >= 0) & (s1 >= 0)
+            a, b = np.clip(s0, 0, None), np.clip(s1, 0, None)
+            sel = ok & ((self.mine[a] & self.other[b]) | (self.mine[b] & self.other[a]))
+            if sel.any():
+                rec["force"] = float(np.linalg.norm(f.numpy()[:n][sel][:, :3].astype(float), axis=1).sum())
+        self.history.append(rec)
+        return rec

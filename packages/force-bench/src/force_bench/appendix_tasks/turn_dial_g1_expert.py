@@ -34,7 +34,7 @@ import force_bench.appendix_tasks.turn_dial_to_target as T
 from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, appendix_rig, sample_start
 from force_bench.appendix_tasks.install_light_bulb_g1 import (FLOOR_CB, PELVIS_Z_CB, TABLE_HALF, WRIST_MAX, dex1_q,
                                                               render_start)
-from force_bench.g1.robot import (PREFIX, ContactPeak, G1IK, SumProbe, TorqueMonitor, add_g1, apply_look,
+from force_bench.g1.robot import (PREFIX, ContactPeak, G1IK, MagnitudeProbe, SumProbe, TorqueMonitor, add_g1, apply_look,
                                   camera_mounts, cap_headroom, effective_arm_caps, finger_readback, floor_and_table,
                                   gravity_torques, init_pose, sim_cap_readback)
 from force_bench.kit import add_asset, load_kit, place_on_table
@@ -307,9 +307,10 @@ def main(argv=None):
             rig.builder.shape_gap[i] = T.ROBOT_GAP
     fingers = [f"{SIDE}_dex1_finger_joint_1", f"{SIDE}_dex1_finger_joint_2"]
     fdofs = [int(rig.builder.joint_qd_start[g1["joints"][n]]) for n in fingers]
-    for d in fdofs:                                          # the row's own finger drive (the FR3 row sets its own)
-        rig.builder.joint_target_ke[d] = T.FINGER_KE
-        rig.builder.joint_target_kd[d] = T.FINGER_KD
+    if not REGRASP:                                          # the FR3 row's own finger drive (the single-grasp
+        for d in fdofs:                                      # set); the regrasp set keeps the Dex1's own gain:
+            rig.builder.joint_target_ke[d] = T.FINGER_KE     # 20 kN/m on the Dex1 fingers chattered through the bar
+            rig.builder.joint_target_kd[d] = T.FINGER_KD
     g = T._grip_geometry(load_kit()[key], choice, KNOB, h.info.get("up_gap_mm", 0.0) * T.MM)
     g = {**g, "tcp_z": g["tip_z"] + DEX1_TIP_PAST_PAD}       # the Dex1 pad centre above its fingertips
     axis = np.asarray(h.pose[:2, 3], float)
@@ -385,8 +386,10 @@ def main(argv=None):
                      and any(s in lbl for s in ("_top", "_bottom", "gate_"))]
     moving = [rig.model.body_label[b] for b in h.bodies.values()]
     links = {i: [f"{PREFIX}{SIDE}_hand_Link{i}_{k}" for k in (2, 3)] for i in (1, 2)}
-    probes = {"finL": SumProbe([PairProbe(rig.model, lb, counterpart_shapes=knob_shapes) for lb in links[1]]),
-              "finR": SumProbe([PairProbe(rig.model, lb, counterpart_shapes=knob_shapes) for lb in links[2]]),
+    # one finger = a Dex1 jaw's two links; its force is the SUM OF CONTACT MAGNITUDES on them against the knob (a net
+    # vector total let a finger box chattering through the 10 mm bar read 549 N while its contacts summed 8.3 kN)
+    probes = {"finL": MagnitudeProbe(rig.model, links[1], counterpart_shapes=knob_shapes),
+              "finR": MagnitudeProbe(rig.model, links[2], counterpart_shapes=knob_shapes),
               "robot_object": RobotContactProbe(rig.model, moving, static_shapes=static_labels)}
     rig.probes.update(probes)
     rig.pad_probes = ("finL", "finR")
@@ -411,9 +414,14 @@ def main(argv=None):
         "dial_finger_squeeze_source": "the FR3 dial row's flat-knob squeeze, set as each Dex1 finger actuator's force "
                                       "cap (Expert.squeeze; G1_FINGER_EFFORT=70 at build), inside the Dex1's 5-120 N; "
                                       "read back from the compiled model in finger_actuators_sim_readback",
-        "dial_finger_stiffness_N_per_m": T.FINGER_KE,
-        "dial_finger_stiffness_source": "the FR3 dial row's own finger position-drive gain (a controller gain, not a "
-                                        "material property): the row closes 1.5 x squeeze / gain past contact",
+        "dial_finger_stiffness_N_per_m": T.FINGER_KE if not REGRASP else float(rig.model.joint_target_ke.numpy()[fdofs[0]]),
+        "dial_finger_stiffness_source": ("the FR3 dial row's own finger position-drive gain (a controller gain, not a "
+                                         "material property): the row closes 1.5 x squeeze / gain past contact")
+                                        if not REGRASP else
+                                        ("the Dex1's own finger gain (matrix's MuJoCo Dex1, as the other G1 rows; a "
+                                         "controller gain): the FR3 row's 20 kN/m chattered the Dex1 finger boxes "
+                                         "through the bar; the grip closes 1.25 x squeeze / gain past contact so the "
+                                         "70 N cap binds"),
         "dex1_tcp_above_tips_m": DEX1_TIP_PAST_PAD,
         "dex1_tcp_source": "the Dex1 pad centre is 27.3 mm above its fingertips (the FR3's TCP is 9.93 mm): the "
                            "expert's TCP height is the grip's tip height + 27.3 mm",
@@ -447,6 +455,9 @@ def main(argv=None):
     tips = [rig.body_index(f"{PREFIX}{SIDE}_hand_Link{i}_3") for i in (1, 2)]
     if REGRASP:
         ex = G1DialRegraspExpert(rig, h, DIAL, KNOB, math.radians(TARGET_DEG), g, probes, tips, a0)
+        kp_f = float(rig.model.joint_target_ke.numpy()[fdofs[0]])
+        ex.f_grip = max(0.0, ex.f_touch - 1.25 * T.SQUEEZE[KNOB] / kp_f)   # the cap (70 N) binds at the Dex1's gain
+        rig.finger_params = finger_readback(rig.solver, rig.model, g1, SIDE, overdrive_m=1.25 * T.SQUEEZE[KNOB] / kp_f)
         ex.setup_strokes(ys_b, ok_b, yaw0, first)
         rig.variant_extra.update(
             dial_regrasp=True, dial_stroke_max_deg=math.degrees(STROKE_MAX), dial_regrasp_lift_m=LIFT,
