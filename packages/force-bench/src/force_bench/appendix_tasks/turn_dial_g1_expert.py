@@ -130,6 +130,14 @@ def reach_band(ik, axis, z, step_deg=15.0):
     return runs
 
 
+def dex1_q_unclipped_closed(fr3_dof: float) -> float:
+    """dex1_q without the closed-end clip (force grip): the open end still clips at the travel's limit."""
+    from force_bench.appendix_tasks.install_light_bulb_g1 import DEX1_Q
+    from force_bench.g1.robot import DEX1_HALF_GAP0
+    import force_bench.appendix_tasks._kit_thread as kt
+    return float(max(DEX1_HALF_GAP0 - (fr3_dof - kt.PAD_OFF), DEX1_Q[0]))
+
+
 class G1DialExpert(T.Expert):
     """The FR3 row's Expert, unchanged, with the squeeze written to the Dex1 finger actuators and the arm torques
     sampled each frame."""
@@ -563,9 +571,12 @@ def main(argv=None):
         q = ik.solve(tcp_pos, tcp_quat, iterations=16)
         qt = rig.control.joint_target_q.numpy()
         qt[arm_t] = q[ik_arm_q]
-        ex_ = grip_ref.get("ex")
-        if G1R.FINGER_COMMAND == "force" and ex_ is not None and float(fingers) < ex_.f_touch:
-            qt[fin_t] = G1R.force_grip_target(grip_ref["kp"])      # past touch: the grip-force close
+        if G1R.FINGER_COMMAND == "force":
+            # grip-force close: the expert's own close ramp, not clipped at the closed end of travel, so the target
+            # keeps moving at the ramp's speed past contact to f_grip (1.25 x set force / kp beyond touch) and the
+            # effort cap (the set force) binds; the joint limit stays the physical stop.  (A step to the far target
+            # at touch, the first version, accelerated the free fingers into the bar: 15-23 kN close frames.)
+            qt[fin_t] = dex1_q_unclipped_closed(float(fingers))
         else:
             qt[fin_t] = dex1_q(float(fingers))
         rig.control.joint_target_q.assign(qt)
