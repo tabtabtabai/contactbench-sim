@@ -88,6 +88,11 @@ class Episode:
         from force_bench.policy_env.finger_force import FR3_FINGERS, FingerMagnitudes
         self.finger_mag = FingerMagnitudes(rig.model, getattr(adapter_cls, "finger_bodies", None) or FR3_FINGERS)
         self.finger_now = None
+        # the FR3 arm's torques against its limits (the G1 rows carry their own TorqueMonitor)
+        self.arm_torque = None
+        if "fr3/fr3_link0" in [str(b) for b in rig.model.body_label]:
+            from force_bench.policy_env.arm_torque import ArmTorqueMonitor
+            self.arm_torque = ArmTorqueMonitor(rig.model, getattr(rig, "solver", None))
         self.adapter = adapter_cls(self)
         self.cams = None
         self.videos = {}
@@ -203,6 +208,8 @@ class Episode:
             forces[f"{pname}_N"] = round(r["force"], 4)
             forces[f"{pname}_fric_N"] = round(r["friction"], 4)
         self.finger_now = self.finger_mag.sample(rig.contacts, self.t)   # rule A's force (sum of magnitudes)
+        if self.arm_torque is not None:
+            self.arm_torque.sample(rig.s0, rig.control, self.t)
         if self.extra_cb:
             forces.update(self.extra_cb(rig.s0, self.t))
         if rig.rec is not None:
