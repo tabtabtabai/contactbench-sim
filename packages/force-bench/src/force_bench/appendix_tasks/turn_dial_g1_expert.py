@@ -294,7 +294,8 @@ class G1DialRegraspExpert(G1DialExpert):
                 self._begin(st["r_to"], st["r_next"][1], ang, drift)
                 self.go("close", t)
             return
-        if ph in ("open", "retreat", "still") and self.strokes and "turned_deg" not in self.strokes[-1]:
+        if (ph in ("open", "retreat", "still") and self.strokes and "from_deg" in self.strokes[-1]
+                and "turned_deg" not in self.strokes[-1]):
             self.strokes[-1]["turned_deg"] = round(math.degrees(ang) - self.strokes[-1]["from_deg"], 2)
         super().control(t)
 
