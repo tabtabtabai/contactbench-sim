@@ -97,8 +97,8 @@ class Episode:
         self.cams = None
         self.videos = {}
         if cameras:
-            from force_bench.policy_env.cameras import PolicyCameras
-            self.cams = PolicyCameras(rig, **self.adapter.camera_layout())
+            from force_bench.policy_env.filament.cameras import policy_cameras
+            self.cams = policy_cameras(rig, **self.adapter.camera_layout())   # Filament from render version 4
             if video_dir is not None:
                 self.videos = _CameraVideos(Path(video_dir), self.cams.NAMES, self.VIDEO_HZ)
                 self._record_views()
