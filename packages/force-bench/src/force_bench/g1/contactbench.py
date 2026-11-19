@@ -59,6 +59,8 @@ def prepare(test: str, seed: int | None) -> dict:
     """The row, its argv and its inputs for one episode."""
     r = ROWS[test]
     plan = PLANS / r["plan"].format(seed=0 if seed is None else seed) if r["plan"] else None
+    if test == "5.6" and os.environ.get("G1_DIAL_REGRASP", r["env"].get("G1_DIAL_REGRASP")) == "0":
+        plan = None            # the single grasp plans online (its reach check); only the regrasp reads the IK table
     from force_bench.g1 import robot as g1robot
     inputs = {"model": {"name": MODEL.name, "sha256": _sha(MODEL)}}
     if g1robot.FINGER_COLLISION == "mesh":
