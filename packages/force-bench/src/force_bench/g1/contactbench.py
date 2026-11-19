@@ -97,6 +97,16 @@ def scene_common(rec: dict, rig=None) -> None:
     """The fields every G1 record carries (episode or reach miss)."""
     from force_bench.g1 import robot as g1robot
     st = getattr(rig, "scene_table", None) if rig is not None else None
+    fcm = dict(g1robot.FINGER_COLLISION_MODEL) if g1robot.FINGER_COLLISION == "mesh" else {}
+    rec["finger_collision_model"] = ({"type": "mesh", "method": fcm.get("method"),
+                                      "hulls_file": Path(g1robot.FINGER_HULLS).name,
+                                      "hulls_file_sha256": fcm.get("hulls_file_sha256"), "pieces": fcm.get("pieces"),
+                                      "max_hull_off_mesh_mm": fcm.get("max_hull_off_mesh_mm"),
+                                      "source_mesh": fcm.get("source_mesh")}
+                                     if g1robot.FINGER_COLLISION == "mesh" else
+                                     {"type": "box", "source": "a box per Dex1 finger link fitted to its collision mesh"})
+    ve = (getattr(rig, "variant_extra", None) or {}) if rig is not None else {}
+    rec["dial_bar_collider"] = ve.get("dial_bar_collider")      # 5.6: the box (type, dimensions, source); else None
     rec.update(robot=g1robot.robot_name(), robot_variant=False,
                scene_table=st if st else {"type": os.environ.get("TB_TABLE") or "contactbench",
                                           "source": "Rig.table (the Isaac table when TB_TABLE=isaac)"},
