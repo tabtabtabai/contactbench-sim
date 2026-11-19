@@ -300,7 +300,7 @@ class ContactPeak:
                     normal[(a, b)] = normal.get((a, b), 0.0) + fni
                 if normal:
                     (na, nb), nmax = max(normal.items(), key=lambda kv: kv[1])
-                    if self.peak_normal is None or nmax > self.peak_normal["force_N"]:
+                    if nmax > 1e-6 and (self.peak_normal is None or nmax > self.peak_normal["force_N"]):
                         self.peak_normal = {"t": round(float(t), 3), "force_N": round(float(nmax), 1),
                                             "full_N": round(float(pairs[(na, nb)][0]), 1),
                                             "shape_a": self.shape_labels[na], "shape_b": self.shape_labels[nb],
