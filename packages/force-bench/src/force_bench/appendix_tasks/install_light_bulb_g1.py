@@ -112,6 +112,22 @@ def wrist_window(ik: G1IK, axis_xy, z_start, z_seat):
     return start - YAW_MARGIN, start - span + YAW_MARGIN, q_start, gmax
 
 
+def render_start(rig, seconds: float = 2.0, hz: int = 15) -> list:
+    """The seeded start scene's first frame from the episode's own policy cameras, held for ``seconds``: one MP4 per
+    camera in the episode folder (where an episode's camera_*.mp4 go).  No physics is stepped."""
+    import newton
+    from force_bench.policy_env.cameras import PolicyCameras
+    from force_bench.policy_env.episode import _CameraVideos
+    newton.eval_fk(rig.model, rig.s0.joint_q, rig.s0.joint_qd, rig.s0)
+    tf = rig.rec.cam_tf.numpy()[0][0]
+    cams = PolicyCameras(rig, scene_pos=np.array(tf[:3], float), scene_target=np.asarray(rig.rec.cam2_target, float))
+    vids = _CameraVideos(rig.out_dir.parent.parent, cams.NAMES, hz)
+    frame = cams.capture(0.0)["images"]
+    for _ in range(int(round(seconds * hz))):
+        vids.append(frame)
+    return vids.close()
+
+
 class G1ScrewExpert(kt.ScrewExpert):
     """The kit's screw expert, unchanged, with the arm torques sampled each frame."""
 
@@ -147,7 +163,12 @@ def setup(a, name):
     ik = G1IK(a.model, pelvis, SIDE, start_q)
     jmap = {n: g1["joints"][n] for n in ik.arm}
     ik.arm_joints = [ik.g1["joints"][n] for n in ik.arm]
-    yaw_hi, yaw_lo, q_hi, gmax = wrist_window(ik, S.axis_xy, tcp0[2], seat_tcp_z)
+    try:
+        yaw_hi, yaw_lo, q_hi, gmax = wrist_window(ik, S.axis_xy, tcp0[2], seat_tcp_z)
+        miss = None
+    except SystemExit as e:                  # a reach miss: build the seeded start scene anyway, render its start
+        miss = e                             # frame from the policy cameras, then report the miss
+        yaw_hi, yaw_lo, q_hi, gmax = kt.YAW_HI, kt.YAW_LO, None, np.zeros(len(ik.arm))
     kt.YAW_HI, kt.YAW_LO = yaw_hi, yaw_lo
     kt.HAND_BODY = PREFIX + f"{SIDE}_hand_base_link"
     # the G1's speed rule on the expert's FR3 timings: twist <= WRIST_MAX, and the open hand's turn back over the
@@ -156,8 +177,9 @@ def setup(a, name):
     for k in ("OMEGA", "OMEGA_ENGAGE", "OMEGA_TAKEUP", "OMEGA_SEAT"):
         setattr(kt, k, min(getattr(kt, k), WRIST_MAX))
     kt.T_RET = max(kt.T_RET, 1.875 * (yaw_hi - yaw_lo) / WRIST_MAX)
-    ik.joint_q.assign(q_hi)
-    q_sol = ik.solve(tcp0, down_grasp_quat(yaw_hi), iterations=96)
+    if miss is None:
+        ik.joint_q.assign(q_hi)
+        q_sol = ik.solve(tcp0, down_grasp_quat(yaw_hi), iterations=96)
     budget = gmax + FF_MARGIN
     rig.effort_budget = cap_headroom(rig.builder, g1, ik.arm, budget)
     qs_b = rig.builder.joint_q_start
@@ -166,7 +188,7 @@ def setup(a, name):
             rig.builder.joint_q[int(qs_b[g1["joints"][n]])] = float(v)
             rig.builder.joint_target_q[int(qs_b[g1["joints"][n]])] = float(v)
     ik_qs = ik.model.joint_q_start.numpy()
-    for n in ik.arm:                                        # ... the active one at the start grasp
+    for n in (ik.arm if miss is None else []):              # ... the active one at the start grasp
         v = float(q_sol[int(ik_qs[ik.g1["joints"][n]])])
         rig.builder.joint_q[int(qs_b[jmap[n]])] = v
         rig.builder.joint_target_q[int(qs_b[jmap[n]])] = v
@@ -197,6 +219,9 @@ def setup(a, name):
     cj = int(np.flatnonzero(rig.model.joint_child.numpy() == S.part)[0])
     rig.solver = kt.ProbeTorque(rig.solver, int(rig.model.joint_qd_start.numpy()[cj]) + 5)
     rig.camera_mounts = camera_mounts(a.model, SIDE)
+    if miss is not None:                                    # the start frame (the G1 at its stance, the arm in its
+        rig.start_videos = render_start(rig)                # reset pose: no grasp reaches), then the miss
+        raise miss
     # ── the drive the screw expert calls ───────────────────────────────────────────────────────────────────────
     tqs = rig.model.joint_target_q_start.numpy()
     dqs = rig.model.joint_qd_start.numpy()
