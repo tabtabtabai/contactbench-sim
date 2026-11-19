@@ -57,16 +57,28 @@ class G1IO:
 
     def __init__(self, model):
         labels = [str(x or "") for x in model.joint_label]
+        # three layouts: joint_q (coords), joint_target_q (the targets: the coord layout, the rows' tq_index) and
+        # joint_f / effort limits (dofs, joint_qd_start); a free joint makes them differ
         qs, ds = model.joint_q_start.numpy(), model.joint_qd_start.numpy()
+        ts = model.joint_target_q_start.numpy()
         idx = {lb: j for j, lb in enumerate(labels)}
-        self.arm_q, self.arm_d, self.fin_q, self.fin_d = {}, {}, {}, {}
+        self.model = model
+        self.arm_q, self.arm_t, self.arm_d, self.arm_j, self.fin_q, self.fin_t = {}, {}, {}, {}, {}, {}
         for side in ("left", "right"):
             js = [idx[f"{PREFIX}{side}_{n}_joint"] for n in ARM]
+            self.arm_j[side] = js
             self.arm_q[side] = np.array([int(qs[j]) for j in js])
+            self.arm_t[side] = np.array([int(ts[j]) for j in js])
             self.arm_d[side] = np.array([int(ds[j]) for j in js])
             fs = [idx[f"{PREFIX}{side}_dex1_finger_joint_{k}"] for k in (1, 2)]
             self.fin_q[side] = np.array([int(qs[j]) for j in fs])
-            self.fin_d[side] = np.array([int(ds[j]) for j in fs])
+            self.fin_t[side] = np.array([int(ts[j]) for j in fs])
+        # the gravity feed-forward each arm joint may add: its URDF cap less the actuator cap the row set (the
+        # scripted rows reserve that headroom on the arm they use; an arm without it gets none, as in those rows)
+        from force_bench.g1.robot import arm_cap
+        lim = model.joint_effort_limit.numpy()
+        self.ff_max = {side: np.array([max(0.0, (arm_cap(f"{side}_{n}_joint") or 0.0) - float(lim[d]))
+                                       for n, d in zip(ARM, self.arm_d[side])]) for side in ("left", "right")}
         bl = [str(b) for b in model.body_label]
         self.pelvis = bl.index(f"{PREFIX}pelvis")
         self.gripper_base = {s: bl.index(f"{PREFIX}{s}_dex1_base_link") for s in ("left", "right")}
@@ -94,18 +106,30 @@ class G1IO:
         """Absolute targets: the arms' 7 joints each and both Dex1 fingers from the raw gripper value."""
         tq = control.joint_target_q.numpy()
         for side in ("left", "right"):
-            tq[self.arm_d[side]] = np.asarray(row[f"action.{side}_arm"], float).reshape(7)
+            tq[self.arm_t[side]] = np.asarray(row[f"action.{side}_arm"], float).reshape(7)
             g = float(np.asarray(row[f"action.{side}_gripper"], float).reshape(-1)[0])
-            tq[self.fin_d[side]] = q_of_raw(g)
+            tq[self.fin_t[side]] = q_of_raw(g)
         control.joint_target_q.assign(tq)
+
+    def gravity_ff(self, state, control) -> None:
+        """The robot's own gravity compensation on both arms from the live pose, every frame (the scripted rows feed
+        the same torques forward), clipped at each joint's reserved headroom."""
+        from force_bench.g1.robot import gravity_torques
+        bq = state.body_q.numpy()
+        jf = control.joint_f.numpy()
+        for side in ("left", "right"):
+            if self.ff_max[side].any():
+                g = gravity_torques(self.model, bq, self.arm_j[side])
+                jf[self.arm_d[side]] = np.clip(g, -self.ff_max[side], self.ff_max[side])
+        control.joint_f.assign(jf)
 
     def target_row(self, control) -> dict:
         """The targets the robot is driven to now, as an action row (records a scripted expert for replay)."""
         tq = control.joint_target_q.numpy()
         out = {}
         for side in ("left", "right"):
-            out[f"action.{side}_arm"] = tq[self.arm_d[side]].astype(np.float32)
-            out[f"action.{side}_gripper"] = np.array([raw_of_q(float(np.mean(tq[self.fin_d[side]])))], np.float32)
+            out[f"action.{side}_arm"] = tq[self.arm_t[side]].astype(np.float32)
+            out[f"action.{side}_gripper"] = np.array([raw_of_q(float(np.mean(tq[self.fin_t[side]])))], np.float32)
         return out
 
     def current_row(self, state) -> dict:
