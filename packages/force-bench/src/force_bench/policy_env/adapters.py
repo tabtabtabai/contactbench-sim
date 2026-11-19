@@ -38,7 +38,7 @@ FORCE_LIMIT_FRAMES = int(os.environ.get("TB_FORCE_LIMIT_FRAMES", "4"))
 
 
 def force_limit_rule() -> str:
-    return (f"per-finger contact force (each finger body's total over its shapes) > {FORCE_LIMIT_N:g} N for "
+    return (f"per-finger contact force (the sum of contact magnitudes on each finger body's shapes, contract #1773) > {FORCE_LIMIT_N:g} N for "
             f"{FORCE_LIMIT_FRAMES} consecutive frame(s) at 60 Hz, fixed, independent of the grip setting")
 
 
@@ -112,8 +112,12 @@ class Adapter:
         return FORCE_LIMIT_N
 
     def _force(self, t, f, summed=False):
-        """f: the larger of the two pad forces this frame (N)."""
+        """f: the larger of the two NET pad forces this frame (the row's probes), kept as peak_pad_net_n.  Rule A reads
+        the episode's sum-of-contact-magnitudes finger force (contract #1773), which net cancellation can't hide."""
         lim = FORCE_LIMIT_N
+        self.peak_pad_net_n = max(getattr(self, "peak_pad_net_n", 0.0), float(f))
+        if self.ep.finger_now is not None:
+            f = max(self.ep.finger_now)
         self.peak_pad_n = max(getattr(self, "peak_pad_n", 0.0), float(f))
         self.over = self.over + 1 if f > lim else 0
         if self.over == FORCE_LIMIT_FRAMES:
