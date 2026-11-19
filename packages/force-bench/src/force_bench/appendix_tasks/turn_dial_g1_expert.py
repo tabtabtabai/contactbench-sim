@@ -143,6 +143,146 @@ class G1DialExpert(T.Expert):
         return super().extra(state, t)
 
 
+REGRASP = os.environ.get("G1_DIAL_REGRASP", "0") == "1"
+STROKE_MAX = math.radians(60.0)
+STROKE_MIN = math.radians(10.0)
+LIFT = 0.030                         # m the open hand rises between strokes (the tips clear the bar's 53 mm top)
+DRIFT_TOL = math.radians(T.HALF_TICK_DEG)   # the brake must hold the dial within half a tick while the jaws are open
+
+
+def band_mask(ik, axis, z, step_deg=5.0):
+    """The reached top-down yaws at the grasp, sampled every step_deg: (yaws in rad, reached mask)."""
+    q_home = ik.joint_q.numpy().copy()
+    p = np.array([axis[0], axis[1], z])
+    ys = np.radians(np.arange(-180.0, 180.0, step_deg))
+    ok = np.zeros(len(ys), bool)
+    for i, y in enumerate(ys):
+        ik.joint_q.assign(q_home)
+        for _ in range(3):
+            ik.solve(p, down_grasp_quat(float(y)), iterations=48)
+        e = ik.residual(p, down_grasp_quat(float(y)))
+        ok[i] = e[0] <= FIT_TOL[0] and e[1] <= FIT_TOL[1]
+    ik.joint_q.assign(q_home)
+    return ys, ok
+
+
+def _runs(ys, ok):
+    out, cur = [], None
+    for y, r in zip(ys, ok):
+        if r and cur is None:
+            cur = [y, y]
+        elif r:
+            cur[1] = y
+        elif cur is not None:
+            out.append(cur)
+            cur = None
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
+def stroke_from(ys, ok, bar_abs, remaining):
+    """The next stroke from the bar's absolute angle: the grasp yaw (the bar's angle or its 180-deg twin) with the
+    longest reached run onward, and the stroke's turn (<= remaining, <= STROKE_MAX); None if neither side reaches
+    STROKE_MIN."""
+    step = ys[1] - ys[0]
+    best = None
+    for g in (bar_abs, bar_abs + math.pi):
+        k0 = int(round((math.remainder(g, 2 * math.pi) + math.pi) / step)) % len(ys)
+        run = 0
+        while run < len(ys) and ok[(k0 + run) % len(ys)]:
+            run += 1
+        reach = (run - 1) * step if run else -1.0
+        if best is None or reach > best[1]:
+            best = (math.remainder(g, 2 * math.pi), reach)
+    if best[1] < STROKE_MIN:
+        return None
+    return best[0], min(remaining, STROKE_MAX, best[1] - math.radians(5.0))
+
+
+class G1DialRegraspExpert(G1DialExpert):
+    """The FR3 expert in strokes (the dial's brake holds it between them): each stroke closes on the bar at its
+    current angle (the FR3 close: squeeze, xy servo), turns it closed on the measured angle (the FR3 turn) to the
+    stroke's end; between strokes the jaws open, the hand rises LIFT, turns to the next grasp yaw at <= WRIST_MAX and
+    lowers; the last stroke ends with the FR3 trim, open, retreat and still.  Per stroke: the turn and the dial's
+    drift while the jaws were open."""
+
+    def setup_strokes(self, ys, ok, bar_yaw0, first):
+        self.ys, self.ok, self.bar_yaw0 = ys, ok, bar_yaw0
+        self.strokes, self.final = [], False
+        self.target_final = self.target
+        self._begin(first[0], first[1], 0.0, None)
+
+    def _begin(self, grasp_abs, turn, ang, drift):
+        """A stroke from dial angle ang: the hand's yaw command is relative to (grasp_abs - ang)."""
+        self.yaw0 = grasp_abs - ang
+        self.st["yaw_cmd"] = ang
+        self.stroke_end = ang + turn
+        self.final = self.stroke_end >= self.target_final - 1e-6
+        self.target = self.target_final if self.final else self.stroke_end
+        self.strokes.append({"grasp_yaw_deg": round(math.degrees(grasp_abs), 1), "from_deg": round(math.degrees(ang), 2),
+                             "planned_turn_deg": round(math.degrees(turn), 1), "drift_while_open_deg":
+                             None if drift is None else round(math.degrees(drift), 2)})
+        self.rig.dial_strokes = self.strokes
+
+    def control(self, t):
+        st = self.st
+        ph = st["phase"]
+        ang, _ = T.D.knob_coords(self.rig, self.h)
+        if ph == "trim" and not self.final:            # a stroke's end (not the last): let go and regrasp
+            self.strokes[-1]["turned_deg"] = round(math.degrees(ang) - self.strokes[-1]["from_deg"], 2)
+            st["r_ang"], st["r_yaw"], st["r_z"] = ang, self.yaw0 + st["yaw_cmd"], self.tcp0[2]
+            self.go("r_open", t)
+            ph = "r_open"
+        tau = t - st["t0"]
+        z0 = self.tcp0[2]
+        if ph == "r_open":
+            u = T.ease(tau / T.T_OPEN)
+            self._drive_abs(st["r_yaw"], z0, self.f_grip + (self.f_open - self.f_grip) * u)
+            if tau >= T.T_OPEN:
+                self.go("r_lift", t)
+            return
+        if ph == "r_lift":
+            u = T.ease(tau / 0.6)
+            self._drive_abs(st["r_yaw"], z0 + LIFT * u, self.f_open)
+            if tau >= 0.6:
+                remaining = self.target_final - ang
+                nxt = stroke_from(self.ys, self.ok, self.bar_yaw0 + ang, remaining)
+                if nxt is None:                        # no side reaches onward: stop here (the judge scores it)
+                    self.final, self.yaw0 = True, 0.0
+                    self.strokes.append({"stopped": "no grasp side reaches onward", "at_deg": round(math.degrees(ang), 2)})
+                    st["yaw_release"], st["z_release"] = st["r_yaw"], z0 + LIFT
+                    self.go("retreat", t)
+                    return
+                st["r_next"] = nxt
+                d = math.remainder(nxt[0] - st["r_yaw"], 2 * math.pi)
+                st["r_from"], st["r_to"] = st["r_yaw"], st["r_yaw"] + d
+                st["r_T"] = max(0.6, 1.875 * abs(d) / WRIST_MAX)
+                self.go("r_rotate", t)
+            return
+        if ph == "r_rotate":
+            u = T.ease(tau / st["r_T"])
+            self._drive_abs(st["r_from"] + (st["r_to"] - st["r_from"]) * u, z0 + LIFT, self.f_open)
+            if tau >= st["r_T"]:
+                self.go("r_lower", t)
+            return
+        if ph == "r_lower":
+            u = T.ease(tau / 0.6)
+            self._drive_abs(st["r_to"], z0 + LIFT * (1 - u), self.f_open)
+            if tau >= 0.6:
+                drift = ang - st["r_ang"]
+                self._begin(st["r_to"], st["r_next"][1], ang, drift)
+                self.go("close", t)
+            return
+        if ph in ("open", "retreat", "still") and self.strokes and "turned_deg" not in self.strokes[-1]:
+            self.strokes[-1]["turned_deg"] = round(math.degrees(ang) - self.strokes[-1]["from_deg"], 2)
+        super().control(t)
+
+    def _drive_abs(self, yaw_abs, z, f):
+        p = self.tcp0[:2] + self.xy
+        self.rig.drive_arm(np.array([p[0], p[1], z]), down_grasp_quat(yaw_abs), fingers=f)
+
+
 def main(argv=None):
     a = parse(argv)
     start = sample_start({"dial": T.DIAL_PLACE}, a.seed)["dial"]
@@ -180,13 +320,32 @@ def main(argv=None):
     ik = G1IK(a.model, pelvis, SIDE, start_q)
     ik.arm_joints = [ik.g1["joints"][n] for n in ik.arm]
     jmap = {n: g1["joints"][n] for n in ik.arm}
-    fit = turn_fit(ik, axis, tcp0[2], yaw0, ik.arm_joints)
+    if REGRASP:                                              # strokes: the band, and the first stroke from it
+        ys_b, ok_b = band_mask(ik, axis, tcp0[2])
+        first = stroke_from(ys_b, ok_b, yaw0, math.radians(TARGET_DEG))
+        fit = None
+        if first is not None:
+            q_home = ik.joint_q.numpy().copy()
+            for _ in range(3):
+                ik.solve(tcp0, down_grasp_quat(first[0]), iterations=64)
+            gm = np.abs(gravity_torques(ik.model, ik._state().body_q.numpy(), ik.arm_joints)) + 0.5
+            fit = (first[0], ik.joint_q.numpy().copy(), gm)
+            ik.joint_q.assign(q_home)
+    else:
+        fit = turn_fit(ik, axis, tcp0[2], yaw0, ik.arm_joints)
     miss = None
     if fit is None:
+        if REGRASP:
+            LAST_MISS.update(dial_xy_m=[round(float(v), 4) for v in axis], dial_yaw_deg=round(math.degrees(yaw0), 1),
+                             arm=SIDE, binding_constraint="wrist-band position vs the bar's yaw: neither grasp side of "
+                             "the bar's start angle reaches a 10-deg stroke onward",
+                             reached_band_deg=[[round(math.degrees(v), 0) for v in r] for r in _runs(ys_b, ok_b)])
         need = [[round(math.degrees(math.remainder(b, 2 * math.pi) - MARGIN), 1),
                  round(math.degrees(math.remainder(b, 2 * math.pi) + TURN_NEED + MARGIN), 1)]
                 for b in (yaw0, yaw0 + math.pi)]
-        LAST_MISS.update(dial_xy_m=[round(float(v), 4) for v in axis], dial_yaw_deg=round(math.degrees(yaw0), 1),
+        LAST_MISS.update({} if REGRASP else dict(needed_deg=round(math.degrees(TURN_NEED + 2 * MARGIN), 1)))
+        if not REGRASP:
+            LAST_MISS.update(dial_xy_m=[round(float(v), 4) for v in axis], dial_yaw_deg=round(math.degrees(yaw0), 1),
                          needed_deg=round(math.degrees(TURN_NEED + 2 * MARGIN), 1), arm=SIDE,
                          ik_tolerance=[FIT_TOL[0], round(math.degrees(FIT_TOL[1]), 1)],
                          binding_constraint="wrist-band position vs the bar's yaw: neither needed yaw range lies "
@@ -286,7 +445,20 @@ def main(argv=None):
     rig.torque_monitor = TorqueMonitor(rig.model, g1, ik.arm, {n: int(tqs[jmap[n]]) for n in ik.arm})
     G1DialExpert.finger_dofs = [int(dqs[g1["joints"][n]]) for n in fingers]
     tips = [rig.body_index(f"{PREFIX}{SIDE}_hand_Link{i}_3") for i in (1, 2)]
-    ex = G1DialExpert(rig, h, DIAL, KNOB, math.radians(TARGET_DEG), g, probes, tips, a0)
+    if REGRASP:
+        ex = G1DialRegraspExpert(rig, h, DIAL, KNOB, math.radians(TARGET_DEG), g, probes, tips, a0)
+        ex.setup_strokes(ys_b, ok_b, yaw0, first)
+        rig.variant_extra.update(
+            dial_regrasp=True, dial_stroke_max_deg=math.degrees(STROKE_MAX), dial_regrasp_lift_m=LIFT,
+            dial_drift_tolerance_deg=math.degrees(DRIFT_TOL),
+            dial_regrasp_note="strokes of <= 60 deg, each grasped at the bar's current angle or its 180-deg twin "
+                              "(whichever the measured top-down band continues from); the jaws open, the hand rises "
+                              "30 mm and turns to the next grasp at <= 0.9 rad/s between strokes; the brake holds "
+                              "the dial (drift checked against half a tick)",
+            dial_reached_band_deg=[[round(math.degrees(v), 0) for v in r] for r in
+                                   _runs(ys_b, ok_b)])
+    else:
+        ex = G1DialExpert(rig, h, DIAL, KNOB, math.radians(TARGET_DEG), g, probes, tips, a0)
     print(f"[{NAME}] seed {a.seed}: dial {np.round(axis * 1e3, 1).tolist()} mm, yaw {math.degrees(yaw0):+.1f}; "
           f"grasp yaw {math.degrees(a0):+.1f} (turn to {math.degrees(a0 + TURN_NEED):+.1f}); "
           f"ff budget {np.round(budget, 2).tolist()} N.m", flush=True)
