@@ -66,6 +66,24 @@ FINGER_COMMAND = os.environ.get("G1_FINGER_COMMAND", "position")
 if FINGER_COMMAND not in ("position", "force"):
     raise ValueError(f"G1_FINGER_COMMAND={FINGER_COMMAND!r}: position or force")
 DEX1_Q_CLOSED = 0.0245                    # the finger joints' closed end of travel (limit_upper)
+# Arm damping: "legacy" (kd = 0.04 kp: the box-finger sets) or "model" (the compiled MuJoCo model's actuator kv, from
+# G1_DRIVE_GAINS: a file g1_dex1_drive_gains.py exports beside the model npz, checked against its sha256)
+ARM_DAMPING = os.environ.get("G1_ARM_DAMPING", "legacy")
+DRIVE_GAINS = os.environ.get("G1_DRIVE_GAINS", "")
+if ARM_DAMPING not in ("legacy", "model"):
+    raise ValueError(f"G1_ARM_DAMPING={ARM_DAMPING!r}: legacy or model")
+ARM_KD_USED: dict = {}                    # joint -> kd, filled by add_g1
+
+
+def _model_kv(npz_path) -> dict:
+    import hashlib
+    if not DRIVE_GAINS:
+        raise ValueError("G1_ARM_DAMPING=model needs G1_DRIVE_GAINS (g1_dex1_drive_gains.py output)")
+    g = json.load(open(DRIVE_GAINS))
+    sha = hashlib.sha256(open(npz_path, "rb").read()).hexdigest()
+    if g["model_npz_sha256"] != sha:
+        raise ValueError(f"{DRIVE_GAINS} was exported for model {g['model_npz_sha256']}, not {sha}")
+    return {n: float(v["kv"]) for n, v in g["gains"].items()}
 
 
 def force_grip_target(kp: float, set_force: float | None = None) -> float:
@@ -143,6 +161,7 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
     drives = json.loads(str(d["drive_json"]))
     jnt_of = {int(b): j for j, b in enumerate(d["jnt_body"])}
     hulls = _load_hulls(npz_path) if FINGER_COLLISION == "mesh" else {}
+    model_kv = _model_kv(npz_path) if ARM_DAMPING == "model" else {}
     # world poses by forward composition (MuJoCo body_pos/quat are relative to the parent)
     Xw = {0: np.eye(4)}
     root = 1
@@ -181,6 +200,10 @@ def add_g1(builder: newton.ModelBuilder, npz_path, pelvis_xform: wp.transform, m
                 cap = arm_cap(jn) or 0.0               # the arm's URDF torque limit (the export has none)
             kp = kp if finger else kp * arm_kp_scale
             kd = (0.01 if finger else 0.04) * kp
+            if not finger and ARM_DAMPING == "model" and kp > 0:
+                kd = model_kv[jn]                # the compiled model's actuator kv (biasprm[2])
+            if not finger and kp > 0:
+                ARM_KD_USED[jn] = kd
             lo, hi = (float(v) for v in d["jnt_range"][j])
             kw = dict(parent_xform=pxf, child_xform=cxf, axis=wp.vec3(*d["jnt_axis"][j]), limit_lower=lo,
                       limit_upper=hi, target_ke=kp, target_kd=kd,
@@ -393,9 +416,14 @@ def variant_params() -> dict:
                           "parameters, not an identified PhysX material equivalence'); not measured on the real pads"
                           if PAD_MU == 1.0 else "NON-DEFAULT: a diagnostic value, not for published episodes"),
         "arm_kp_scale": ARM_KP_SCALE,
-        "arm_kp_source": (f"{ARM_KP_SCALE:g}x matrix's MuJoCo arm actuator kp (300 shoulder/elbow, 80 wrist); effort "
-                          "caps unchanged (25 / 5 N.m); with the gravity feed-forward it stands in for the "
-                          "whole-body controller's tracking"),
+        "arm_kp_source": (f"{ARM_KP_SCALE:g}x the export's kp: 120 shoulder, 161.2 elbow and wrist, the isaac profile's "
+                          "droop-calibrated gains; effort caps unchanged (25 / 5 N.m); with the gravity feed-forward "
+                          "it stands in for the whole-body controller's tracking"),
+        "arm_kd": ({n.replace("_joint", ""): round(v, 4) for n, v in ARM_KD_USED.items()} if ARM_KD_USED else None),
+        "arm_kd_source": ("the isaac profile actuator kv from the compiled model, matching Isaac and PR #1779; earlier "
+                          "box sets used kd = 0.04 kp" if ARM_DAMPING == "model" else
+                          "kd = 0.04 kp (the box-finger sets' damping; the compiled model's actuator kv is 3.0 "
+                          "shoulder / 2.5 elbow and wrist)"),
         "arm_effort_caps_Nm": dict(ARM_EFFORT_NM),
         "arm_effort_caps_source": ("the G1 URDF (g1_29dof_*) joint <limit effort>.  The gravity feed-forward is a "
                                    "joint torque outside the PD actuator, so each actuator is capped at the limit "
