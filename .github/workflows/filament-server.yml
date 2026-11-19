@@ -1,0 +1,19 @@
+name: filament-server
+# Builds the render version 4 Filament server from the pinned release and uploads it as an artifact.
+on:
+  push:
+    paths: ["packages/force-bench/src/force_bench/policy_env/filament/**", ".github/workflows/filament-server.yml"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang libc++-dev libc++abi-dev libzstd-dev libx11-dev
+      - name: Build filament_server
+        run: bash packages/force-bench/src/force_bench/policy_env/filament/build_server.sh "$PWD/filament_server" "$RUNNER_TEMP/filament"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filament_server-linux-x86_64
+          path: filament_server

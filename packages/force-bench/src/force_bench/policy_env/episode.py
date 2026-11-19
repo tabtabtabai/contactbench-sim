@@ -100,9 +100,11 @@ class Episode:
         self.cams = None
         self.videos = {}
         if cameras:
-            from force_bench.policy_env.cameras import PolicyCameras
-            self.cams = PolicyCameras(rig, **self.adapter.camera_layout())
+            from force_bench.policy_env.filament.cameras import policy_cameras
+            self.cams = policy_cameras(rig, **self.adapter.camera_layout())    # Filament (render v4) for the G1
             if video_dir is not None:
+                if hasattr(self.cams, "export_dir"):
+                    self.cams.export_dir = Path(video_dir)      # the scene the policy saw, for re-rendering the rollout
                 self.videos = _CameraVideos(Path(video_dir), self.cams.NAMES, self.VIDEO_HZ)
                 self._record_views()
 
@@ -250,7 +252,10 @@ class Episode:
         self.videos.append(self.cams.capture(self.t)["images"])
 
     def close_videos(self) -> list:
-        return self.videos.close() if self.videos else []
+        out = self.videos.close() if self.videos else []
+        if self.cams is not None and hasattr(self.cams, "close"):
+            self.cams.close()                    # render v4: ends the Filament server, writes its timing
+        return out
 
     def end(self, reason: str):
         if not self.done:

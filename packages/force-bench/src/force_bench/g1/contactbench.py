@@ -114,7 +114,13 @@ def scene_common(rec: dict, rig=None) -> None:
                policy_cameras={k: {kk: v for kk, v in c.items() if kk != "ros_q"} | {"ros_q": list(c["ros_q"])}
                                for k, c in g1robot.SPEC_CAMERAS.items()} if g1robot.G1_CAMERAS == "spec"
                else {"source": "the exported model's cameras (G1_CAMERAS=npz)"},
-               render_version=1)
+               render_version=_render_version(rig))
+
+
+def _render_version(rig) -> int:
+    """The policy cameras' render version (4: Filament in the Isaac scene, policy_env/filament; 1: Newton)."""
+    from force_bench.policy_env.filament.cameras import render_version
+    return render_version(rig) if rig is not None else render_version()
 
 
 def reach_miss_record(test: str, seed, policy_id: str, ctx: dict, err: BaseException, budget, folder: Path,
