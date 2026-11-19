@@ -250,6 +250,9 @@ def _qrot(q_xyzw, v):
     return v + w * t + np.cross(q, t)
 
 
+CURRENT_PHASE = [None]          # the row's phase this frame, as last given to TorqueMonitor.sample
+
+
 class ContactPeak:
     """Which contact is behind a force: every frame, the robot's contacts (either shape on a ``prefix`` body) summed
     per shape pair; keeps the strongest pair each frame (``top``), the episode's peak pair and the frames whose
@@ -265,6 +268,7 @@ class ContactPeak:
         self.shape_body = model.shape_body.numpy()
         self.robot = np.array([self._body(i).startswith(prefix) for i in range(len(self.shape_labels))], bool)
         self.history, self.log, self.top, self.peak, self.n_over = [], [], [], None, 0
+        self.peak_normal = None     # the frame's strongest pair by its NORMAL sum (sum of |f.n|), the episode's peak
 
     def _body(self, shape):
         b = int(self.shape_body[shape])
@@ -283,14 +287,25 @@ class ContactPeak:
             rob = ok & (self.robot[np.clip(s0, 0, None)] | self.robot[np.clip(s1, 0, None)])
             if rob.any():
                 idx = np.flatnonzero(rob)
-                F = np.linalg.norm(f.numpy()[:n][idx][:, :3].astype(float), axis=1)
-                pairs = {}
-                for i, fi in zip(idx, F):
+                fv = f.numpy()[:n][idx][:, :3].astype(float)
+                F = np.linalg.norm(fv, axis=1)
+                Fn = np.abs((fv * contacts.rigid_contact_normal.numpy()[:n][idx][:, :3].astype(float)).sum(axis=1))
+                pairs, normal = {}, {}
+                for i, fi, fni in zip(idx, F, Fn):
                     a, b = int(s0[i]), int(s1[i])
                     if not self.robot[a]:
                         a, b = b, a                       # the robot's shape first
                     tot, best_i, best_f = pairs.get((a, b), (0.0, i, -1.0))
                     pairs[(a, b)] = (tot + fi, i if fi > best_f else best_i, max(best_f, fi))
+                    normal[(a, b)] = normal.get((a, b), 0.0) + fni
+                if normal:
+                    (na, nb), nmax = max(normal.items(), key=lambda kv: kv[1])
+                    if self.peak_normal is None or nmax > self.peak_normal["force_N"]:
+                        self.peak_normal = {"t": round(float(t), 3), "force_N": round(float(nmax), 1),
+                                            "full_N": round(float(pairs[(na, nb)][0]), 1),
+                                            "shape_a": self.shape_labels[na], "shape_b": self.shape_labels[nb],
+                                            "body_a": self._body(na), "body_b": self._body(nb),
+                                            "phase": CURRENT_PHASE[0]}
                 ranked = sorted(pairs.items(), key=lambda kv: -kv[1][0])[:3]
                 if ranked and ranked[0][1][0] > 1e-6:
                     bq = state.body_q.numpy()
@@ -301,13 +316,14 @@ class ContactPeak:
                         pt = p0[i].astype(float)
                         if bi >= 0:
                             pt = bq[bi, :3] + _qrot(bq[bi, 3:7], pt)
-                        self.top.append({"force_N": round(float(tot), 1), "shape_a": self.shape_labels[a],
+                        self.top.append({"force_N": round(float(tot), 1), "normal_N": round(float(normal[(a, b)]), 1),
+                                         "shape_a": self.shape_labels[a],
                                          "shape_b": self.shape_labels[b], "body_a": self._body(a),
                                          "body_b": self._body(b), "point": [round(float(v), 4) for v in pt]})
                     rec["force"] = float(ranked[0][1][0])
         if self.top:
             if self.peak is None or self.top[0]["force_N"] > self.peak["force_N"]:
-                self.peak = {"t": round(float(t), 3), **self.top[0]}
+                self.peak = {"t": round(float(t), 3), **self.top[0], "phase": CURRENT_PHASE[0]}
             if self.top[0]["force_N"] > self.LOG_N:
                 self.n_over += 1
                 if len(self.log) < self.MAX_LOG:
@@ -316,7 +332,7 @@ class ContactPeak:
         return rec
 
     def summary(self) -> dict:
-        return {"peak": self.peak, "log_above_N": self.LOG_N, "frames_above": self.n_over,
+        return {"peak": self.peak, "peak_normal": self.peak_normal, "log_above_N": self.LOG_N, "frames_above": self.n_over,
                 "frames_above_logged": self.log}
 
 
@@ -574,6 +590,7 @@ class TorqueMonitor:
         self.over = np.zeros(n, int)
 
     def sample(self, state, control, t, phase=None):
+        CURRENT_PHASE[0] = phase                       # read by ContactPeak (sampled after the step, same frame)
         q = state.joint_q.numpy()[self.qi]
         qd = state.joint_qd.numpy()[self.di]
         qt = control.joint_target_q.numpy()[self.ti]
