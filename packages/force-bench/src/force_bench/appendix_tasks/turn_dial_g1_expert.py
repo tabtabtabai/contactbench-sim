@@ -152,17 +152,36 @@ DRIFT_TOL = math.radians(T.HALF_TICK_DEG)   # the brake must hold the dial withi
 
 
 def band_mask(ik, axis, z, step_deg=5.0):
-    """The reached top-down yaws at the grasp, sampled every step_deg: (yaws in rad, reached mask)."""
+    """The reached top-down yaws at the grasp, sampled every step_deg, by CONTINUATION (as the arm turns): from a
+    converged start every 30 deg, walk both ways in step_deg steps, warm-started, while the IK stays within FIT_TOL.
+    (Independent solves from the reset pose miss yaws the walked IK reaches.)  Returns (yaws in rad, reached mask)."""
     q_home = ik.joint_q.numpy().copy()
     p = np.array([axis[0], axis[1], z])
     ys = np.radians(np.arange(-180.0, 180.0, step_deg))
-    ok = np.zeros(len(ys), bool)
-    for i, y in enumerate(ys):
+    n = len(ys)
+    ok = np.zeros(n, bool)
+
+    def good(y):
+        e = ik.residual(p, down_grasp_quat(float(y)))
+        return e[0] <= FIT_TOL[0] and e[1] <= FIT_TOL[1]
+
+    for s0 in range(0, n, int(round(30.0 / step_deg))):
         ik.joint_q.assign(q_home)
         for _ in range(3):
-            ik.solve(p, down_grasp_quat(float(y)), iterations=48)
-        e = ik.residual(p, down_grasp_quat(float(y)))
-        ok[i] = e[0] <= FIT_TOL[0] and e[1] <= FIT_TOL[1]
+            ik.solve(p, down_grasp_quat(float(ys[s0])), iterations=64)
+        if not good(ys[s0]):
+            continue
+        ok[s0] = True
+        q_s = ik.joint_q.numpy().copy()
+        for d in (1, -1):
+            ik.joint_q.assign(q_s)
+            for k in range(1, n):
+                i = (s0 + d * k) % n
+                y = ys[s0] + d * k * math.radians(step_deg)
+                ik.solve(p, down_grasp_quat(float(y)), iterations=24)
+                if not good(y):
+                    break
+                ok[i] = True
     ik.joint_q.assign(q_home)
     return ys, ok
 
