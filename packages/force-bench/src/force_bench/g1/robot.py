@@ -585,3 +585,30 @@ def sim_cap_readback(solver, g1: dict, budget: dict | None = None, tag: str = "[
         out[jn] = {"forcerange_Nm": [round(lo, 4), round(hi, 4)], "gpu_forcerange_Nm": [round(g_lo, 4), round(g_hi, 4)]
                    if gpu is not None else None, "limit_Nm": cap, "source": "mujoco jnt_actfrcrange (compiled model)"}
     return out
+
+
+def finger_readback(solver, model, g1: dict, side: str, overdrive_m: float, tag: str = "[g1]") -> dict:
+    """The Dex1 finger actuators as the simulator holds them (MuJoCo jnt_actfrcrange, the drive stiffness from the
+    model) and the squeeze a set overdrive past contact commands (stiffness x overdrive, clamped by the range)."""
+    import mujoco
+    s = solver
+    for _ in range(4):
+        if hasattr(s, "mj_model"):
+            break
+        s = getattr(s, "solver", None) or getattr(s, "inner", None) or getattr(s, "_solver", None)
+    mjm = s.mj_model
+    names = [mujoco.mj_id2name(mjm, mujoco.mjtObj.mjOBJ_JOINT, i) or "" for i in range(mjm.njnt)]
+    ds = model.joint_qd_start.numpy()
+    ke = model.joint_target_ke.numpy()
+    out = {}
+    for k in (1, 2):
+        jn = f"{side}_dex1_finger_joint_{k}"
+        i = [j for j, n in enumerate(names) if n.endswith(jn)][0]
+        hi = float(mjm.jnt_actfrcrange[i][1])
+        kp = float(ke[int(ds[g1["joints"][jn]])])
+        sq = min(hi, kp * overdrive_m)
+        print(f"{tag} finger readback {jn}: forcerange +-{hi:.1f} N (mujoco jnt_actfrcrange), kp {kp:.0f} N/m, "
+              f"overdrive {overdrive_m * 1e3:.1f} mm -> commanded squeeze {sq:.1f} N", flush=True)
+        out[jn] = {"forcerange_N": round(hi, 2), "kp_N_per_m": round(kp, 1), "overdrive_mm": round(overdrive_m * 1e3, 2),
+                   "commanded_squeeze_N": round(sq, 2)}
+    return out

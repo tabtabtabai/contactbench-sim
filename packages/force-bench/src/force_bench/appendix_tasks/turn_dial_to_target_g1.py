@@ -31,8 +31,8 @@ from force_bench.appendix_tasks.common import RobotContactProbe, StopRun, append
 from force_bench.appendix_tasks.turn_dial_to_target import (DIAL_KEYS, DIAL_PLACE, IMPRATIO, ITERS, KNOB_LABELS,
                                                             SUBSTEPS, T_STILL)
 from force_bench.g1.robot import (ContactPeak, SumProbe, TorqueMonitor, add_g1, apply_look, camera_mounts,
-                                  cap_headroom, effective_arm_caps, floor_and_table, init_pose, q_indices,
-                                  sim_cap_readback)
+                                  cap_headroom, effective_arm_caps, finger_readback, floor_and_table, init_pose,
+                                  q_indices, sim_cap_readback)
 from force_bench.kit import add_asset, place_on_table
 from force_bench.kit.mechanisms import dial as D
 from force_bench.rig import make_solver
@@ -241,6 +241,7 @@ def main(argv=None):
     rig.finalize(probes=[f"{h.label}/knob"], cam_pos=CAM_POS + shift, cam_target=CAM_TARGET + shift)
     rig.solver = make_solver(rig.model, iterations=ITERS, impratio=IMPRATIO)
     rig.arm_caps_sim = sim_cap_readback(rig.solver, g1, rig.effort_budget)   # what the simulator clamps to
+    rig.finger_params = finger_readback(rig.solver, rig.model, g1, traj["arm"], FINGER_OVERDRIVE)
     rig.arm_caps = effective_arm_caps(rig.model, g1)
     labels = [str(lbl) for lbl in rig.model.shape_label]
     knob_shapes = [lbl for lbl in labels if lbl.startswith(f"kit/{h.label}/") and "knob" in lbl]
