@@ -209,19 +209,10 @@ class Episode:
     def _physics(self, scenery_done=False):
         rig = self.rig
         sim_dt = self.dt / rig.substeps
-        substep_hook = getattr(rig, "substep_hook", None)
-        every = rig.effective_collide_every_substep()
-        if not every:
-            rig.s0.clear_forces()
-            rig.pipeline.collide(rig.s0, rig.contacts)
-        for _ in range(rig.substeps):
-            if every:
-                rig.s0.clear_forces()
-                rig.pipeline.collide(rig.s0, rig.contacts)
-            rig.solver.step(rig.s0, rig.s1, rig.control, rig.contacts, sim_dt)
-            rig.s0, rig.s1 = rig.s1, rig.s0
-            if substep_hook is not None:
-                substep_hook()
+        # the frame's collide + substeps, as one CUDA graph when they can (force_bench.frame_graph; TB_CUDA_GRAPH=0
+        # steps them from Python)
+        from force_bench import frame_graph
+        frame_graph.stepper_for(rig).step(sim_dt)
         self.t += self.dt
         self.frame += 1
         rig.solver.update_contacts(rig.contacts, rig.s0)

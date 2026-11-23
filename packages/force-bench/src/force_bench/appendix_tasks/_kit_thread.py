@@ -738,18 +738,29 @@ class ProbeTorque:
     joint's joint_f goes to MuJoCo's xfrc_applied about the COM, on the part's axis): the BulbSeat /
     CapStiction pattern without the stiction element."""
 
+    # force_bench.frame_graph: ``probe`` is set by the frame's control callback, so the write is host work between
+    # frames; a frame graph replays the solver steps after ``pre_graph`` has done it (where step() would, on the
+    # frame's first substep)
+    graph_safe = True
+
     def __init__(self, solver, dof):
         self._solver = solver
         self.dof = dof
         self.probe = 0.0
         self._written = 0.0
 
-    def step(self, state_in, state_out, control, contacts, dt):
+    def _write(self, control):
         if self.probe != self._written:
             jf = control.joint_f.numpy()
             jf[self.dof] = self.probe
             control.joint_f.assign(jf)
             self._written = self.probe
+
+    def pre_graph(self, control):
+        self._write(control)
+
+    def step(self, state_in, state_out, control, contacts, dt):
+        self._write(control)
         return self._solver.step(state_in, state_out, control, contacts, dt)
 
     def __getattr__(self, name):

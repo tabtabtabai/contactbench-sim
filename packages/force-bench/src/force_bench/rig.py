@@ -31,6 +31,7 @@ import warp as wp
 
 import newton
 
+from force_bench import frame_graph
 from force_bench.probes import ForceProbe
 from force_bench.robot.franka import FrankaIK, add_franka, down_grasp_quat
 from force_bench.paths import OUTPUT_DIR
@@ -800,7 +801,6 @@ class Rig:
         n = int(duration * self.fps)
         t = 0.0
         collection = None
-        substep_hook = getattr(self, "substep_hook", None)
         if os.environ.get("TB_COLLECT_DIR"):
             from force_bench.data.collection import collector_from_env
             collection = collector_from_env(self)
@@ -822,19 +822,9 @@ class Rig:
                 # which is what makes friction-only fingertip grasping work.
                 # Set collide_every_substep=True for scenes with fast free-flight
                 # contact where missing new contacts mid-frame matters more.
-                every_substep = self.effective_collide_every_substep()
-                if not every_substep:
-                    self.s0.clear_forces()
-                    self.pipeline.collide(self.s0, self.contacts)
-                for _ in range(self.substeps):
-                    if every_substep:
-                        self.s0.clear_forces()
-                        self.pipeline.collide(self.s0, self.contacts)
-                    self.solver.step(self.s0, self.s1, self.control,
-                                     self.contacts, sim_dt)
-                    self.s0, self.s1 = self.s1, self.s0
-                    if substep_hook is not None:
-                        substep_hook()
+                # The frame's collide + substeps run as one CUDA graph when they can
+                # (force_bench.frame_graph; TB_CUDA_GRAPH=0 steps them from Python).
+                frame_graph.stepper_for(self).step(sim_dt)
                 t += frame_dt
                 self.solver.update_contacts(self.contacts, self.s0)
                 forces = {}
